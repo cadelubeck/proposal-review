@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "git": {
+      "type": "stdio",
+      "command": "/opt/homebrew/bin/python3.11",
+      "args": [
+        "-m",
+        "mcp_server_git"
+      ],
+      "env": {
+        "PYTHONPATH": "/Users/lubecklaptop/Library/Python/3.11/lib/python/site-packages"
+      }
+    }
+  }
+}

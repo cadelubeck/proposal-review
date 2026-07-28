@@ -1,0 +1,54 @@
+{
+  "id": "eab03f46-405f-4490-a905-555b97429aa5",
+  "name": "Downtown Mixed-Use Rezoning Proposal",
+  "company": "Acme Development LLC",
+  "location": "San Francisco, CA",
+  "status": "rejected",
+  "file_path": null,
+  "text_content": "EXECUTIVE SUMMARY\nThis proposal requests rezoning of parcels on Market Street.\n\n1. PROJECT OVERVIEW\nThe project involves 12 parcels totaling 4.2 acres.\n\n2. ENVIRONMENTAL IMPACT\nNo significant environmental impacts anticipated per CEQA.\n\n3. TRAFFIC ANALYSIS\nPeak hour trips estimated at 340 vehicles. Mitigation required.\n\n4. AFFORDABLE HOUSING\n15% of units designated affordable per local ordinance.",
+  "sections": [
+    {
+      "id": "2dcc9770-a11b-45d1-b6f9-290f722d974e",
+      "title": "EXECUTIVE SUMMARY",
+      "startLine": 0,
+      "score": "green",
+      "notes": "",
+      "statutes": []
+    },
+    {
+      "id": "3656745a-5f12-4f36-a609-ecdb4131a4d9",
+      "title": "1. PROJECT OVERVIEW",
+      "startLine": 3,
+      "score": "green",
+      "notes": "",
+      "statutes": []
+    },
+    {
+      "id": "06dce8c1-0ab6-4aed-8f0a-273eac0fb807",
+      "title": "2. ENVIRONMENTAL IMPACT",
+      "startLine": 6,
+      "score": "green",
+      "notes": "",
+      "statutes": []
+    },
+    {
+      "id": "c0dfda18-adff-4758-9d82-65f1384694a7",
+      "title": "3. TRAFFIC ANALYSIS",
+      "startLine": 9,
+      "score": "green",
+      "notes": "",
+      "statutes": []
+    },
+    {
+      "id": "ebefccbe-aff1-4d96-99a2-cea8f37f8f6a",
+      "title": "4. AFFORDABLE HOUSING",
+      "startLine": 12,
+      "score": "green",
+      "notes": "",
+      "statutes": []
+    }
+  ],
+  "highlights": [],
+  "created_at": "2026-05-22T05:51:18.841Z",
+  "updated_at": "2026-05-22T23:44:02.419Z"
+}
