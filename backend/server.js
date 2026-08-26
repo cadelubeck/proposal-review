@@ -1,4 +1,5 @@
 const express = require('express')
+require('express-async-errors')
 const multer = require('multer')
 const path = require('path')
 const fs = require('fs')
@@ -8,90 +9,36 @@ const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const { structuredResponse, embedTexts } = require('./openai')
 const { buildMatrix } = require('./compliance')
+const { RESEARCH_DOMAINS, buildSourceStatus, matchingDocuments } = require('./source-context')
+const { SOURCE_CATEGORIES, SOURCE_CATEGORY_KEYS, categoryDefinition, documentCategory } = require('./source-catalog')
+const { checkSourceUrl, mergeHealth } = require('./source-health')
+const {
+  cloud, UPLOADS_DIR: UPLOADS,
+  readIndex, writeIndex, readProposal, writeProposal, deleteProposal,
+  readStandards, writeStandards, readUsers, writeUsers, readCompanies, writeCompanies,
+  readInvites, writeInvites, writeAudit, readAudit,
+  saveUpload, readUpload, deleteUpload, standardStoreKeys
+} = require('./persistence')
 
 const app = express()
 app.use(cors())
 app.use(express.json({ limit: '50mb' }))
 
-const DATA_DIR = path.join(__dirname, 'data')
-const UPLOADS = path.join(__dirname, 'uploads')
-const STANDARDS_DIR = path.join(__dirname, 'standards')
-const AUTH_DATA_DIR = process.env.AUTH_DATA_DIR
-  ? path.resolve(process.env.AUTH_DATA_DIR)
-  : path.join(__dirname, '.private')
-;[DATA_DIR, UPLOADS, STANDARDS_DIR].forEach(d => { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }) })
-if (!fs.existsSync(AUTH_DATA_DIR)) fs.mkdirSync(AUTH_DATA_DIR, { recursive: true, mode: 0o700 })
-try { fs.chmodSync(AUTH_DATA_DIR, 0o700) } catch {}
+app.get('/api/health', (_req, res) => {
+  res.json({
+    ok: true,
+    persistence: cloud ? 'supabase' : 'local',
+    aiEnabled: process.env.AI_ENABLED === 'true',
+    webSearchEnabled: process.env.AI_WEB_SEARCH_ENABLED === 'true'
+  })
+})
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-please-set-JWT_SECRET-in-env'
 if (process.env.NODE_ENV === 'production' && JWT_SECRET === 'dev-secret-please-set-JWT_SECRET-in-env') {
   throw new Error('JWT_SECRET must be set to a long, random value in production')
 }
 
-// ── JSON stores ──
-const INDEX_FILE = path.join(DATA_DIR, 'index.json')
-const LEGACY_USERS_FILE = path.join(DATA_DIR, 'users.json')
-const USERS_FILE = path.join(AUTH_DATA_DIR, 'users.json')
-const COMPANIES_FILE = path.join(AUTH_DATA_DIR, 'companies.json')
-const INVITES_FILE = path.join(AUTH_DATA_DIR, 'invites.json')
-const AUDIT_FILE = path.join(AUTH_DATA_DIR, 'audit.jsonl')
-
-// Move existing accounts out of the general application data directory.
-if (!fs.existsSync(USERS_FILE) && fs.existsSync(LEGACY_USERS_FILE)) {
-  fs.copyFileSync(LEGACY_USERS_FILE, USERS_FILE, fs.constants.COPYFILE_EXCL)
-}
-if (fs.existsSync(USERS_FILE)) {
-  try { fs.chmodSync(USERS_FILE, 0o600) } catch {}
-}
-if (fs.existsSync(LEGACY_USERS_FILE) && fs.existsSync(USERS_FILE)) {
-  // Only remove the old copy after confirming the protected copy is valid JSON.
-  JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8'))
-  fs.unlinkSync(LEGACY_USERS_FILE)
-}
-
-function readIndex() { try { return JSON.parse(fs.readFileSync(INDEX_FILE, 'utf-8')) } catch { return [] } }
-function writeIndex(arr) { fs.writeFileSync(INDEX_FILE, JSON.stringify(arr, null, 2)) }
-function readProposal(id) { try { return JSON.parse(fs.readFileSync(path.join(DATA_DIR, `${id}.json`), 'utf-8')) } catch { return null } }
-function writeProposal(id, data) { fs.writeFileSync(path.join(DATA_DIR, `${id}.json`), JSON.stringify(data, null, 2)) }
-function standardsFile(companyId) { return path.join(STANDARDS_DIR, `${companyId}.json`) }
-function readStandards(companyId) { try { return JSON.parse(fs.readFileSync(standardsFile(companyId), 'utf-8')) } catch { return [] } }
-function writeStandards(companyId, data) { fs.writeFileSync(standardsFile(companyId), JSON.stringify(data, null, 2)) }
-function readUsers() { try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf-8')) } catch { return [] } }
-function readCompanies() { try { return JSON.parse(fs.readFileSync(COMPANIES_FILE, 'utf-8')) } catch { return [] } }
-function writeCompanies(arr) { fs.writeFileSync(COMPANIES_FILE, JSON.stringify(arr, null, 2), { mode: 0o600 }) }
-function readInvites() { try { return JSON.parse(fs.readFileSync(INVITES_FILE, 'utf-8')) } catch { return [] } }
-function writeInvites(arr) { fs.writeFileSync(INVITES_FILE, JSON.stringify(arr, null, 2), { mode: 0o600 }) }
-function writeUsers(arr) {
-  const temporaryFile = `${USERS_FILE}.${process.pid}.tmp`
-  fs.writeFileSync(temporaryFile, JSON.stringify(arr, null, 2), { mode: 0o600 })
-  fs.renameSync(temporaryFile, USERS_FILE)
-  try { fs.chmodSync(USERS_FILE, 0o600) } catch {}
-}
-
-function writeAudit(entry) {
-  try {
-    const safeEntry = {
-      timestamp: new Date().toISOString(),
-      ...entry
-    }
-    // JSON Lines keeps the log append-only and avoids storing request bodies, passwords, or tokens.
-    fs.appendFileSync(AUDIT_FILE, `${JSON.stringify(safeEntry)}\n`, { mode: 0o600 })
-    try { fs.chmodSync(AUDIT_FILE, 0o600) } catch {}
-  } catch (error) {
-    console.error('Audit log write failed:', error.message)
-  }
-}
-
-function readAudit() {
-  try {
-    return fs.readFileSync(AUDIT_FILE, 'utf-8')
-      .split('\n')
-      .filter(Boolean)
-      .map(line => JSON.parse(line))
-  } catch {
-    return []
-  }
-}
+const SHARED_STANDARDS_KEY = '_shared'
 
 // Record API usage and troubleshooting metadata without sensitive request content.
 app.use((req, res, next) => {
@@ -103,14 +50,14 @@ app.use((req, res, next) => {
     try { sessionUser = jwt.verify(token, JWT_SECRET) } catch {}
   }
   res.on('finish', () => {
-    writeAudit({
+    void writeAudit({
       event: 'api_request',
       userId: req.user?.id || sessionUser?.id || null,
       method: req.method,
       path: req.path,
       status: res.statusCode,
       durationMs: Date.now() - startedAt,
-      isAiRequest: ['/api/proposals/:id/ai-review', '/api/proposals/:id/analyze-diagrams']
+      isAiRequest: ['/api/proposals/:id/ai-review', '/api/proposals/:id/analyze-diagrams', '/api/proposals/:id/compliance-review']
         .some(pattern => pattern === req.route?.path)
     })
   })
@@ -126,7 +73,7 @@ function requireAuth(req, res, next) {
 }
 
 // ── Multer ──
-const storage = multer.diskStorage({
+const storage = cloud ? multer.memoryStorage() : multer.diskStorage({
   destination: UPLOADS,
   filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
 })
@@ -172,24 +119,39 @@ const requirementSchema = {
       type: 'array',
       items: {
         type: 'object', additionalProperties: false,
-        required: ['category', 'subject', 'description', 'valueType', 'value', 'unit', 'comparison', 'page', 'excerpt'],
+        required: ['category', 'subject', 'description', 'valueType', 'value', 'unit', 'comparison', 'page', 'excerpt', 'definition', 'coordinateSystem', 'scoringRule', 'missingValueConvention'],
         properties: {
           category: { type: 'string' }, subject: { type: 'string' }, description: { type: 'string' },
           valueType: { type: 'string', enum: ['number', 'text'] },
           value: { type: ['number', 'string'] }, unit: { type: ['string', 'null'] },
           comparison: { type: 'string', enum: ['max', 'min', 'exact'] },
-          page: { type: ['integer', 'null'] }, excerpt: { type: 'string' }
+          page: { type: ['integer', 'null'] }, excerpt: { type: 'string' },
+          definition: { type: ['string', 'null'] }, coordinateSystem: { type: ['string', 'null'] },
+          scoringRule: { type: ['string', 'null'] }, missingValueConvention: { type: ['string', 'null'] }
         }
       }
     }
   }
 }
 
+const SOURCE_TAXONOMY_TEXT = SOURCE_CATEGORIES
+  .map(category => `${category.label}: ${category.description}`)
+  .join('\n')
+
+function researchDomainsForDocuments(documents) {
+  const domains = [...RESEARCH_DOMAINS]
+  for (const doc of documents) {
+    if (!doc.sourceUrl || (doc.sensitivity || 'public') === 'restricted') continue
+    try { domains.push(new URL(doc.sourceUrl).hostname) } catch {}
+  }
+  return [...new Set(domains)].slice(0, 100)
+}
+
 async function extractRequirements(text, context) {
   return structuredResponse({
     name: 'civil_engineering_requirements',
     schema: requirementSchema,
-    instructions: `You extract explicit civil-engineering requirements and submitted design values. Never invent values. "max" means the submitted value must be greater than or equal to the requirement (minimum depth, thickness, strength, compaction, diameter). "min" means it must be less than or equal (maximum slope, maximum spacing). "exact" is categorical or exact. Preserve units. Page numbers must come from visible page markers; otherwise null. Excerpts must be short verbatim evidence. Identify roadway, pavement, storm drain, sanitary sewer, water, trench, frost, soils, groundwater, seismic, floodplain, slope, drainage, and utility scope.`,
+    instructions: `You extract explicit civil-engineering, procurement, contract, permitting, cost, schedule, qualification, and project requirements or submitted values. Never invent values. "max" means the submitted value must be greater than or equal to the requirement (minimum depth, thickness, strength, compaction, diameter). "min" means it must be less than or equal (maximum slope, maximum spacing). "exact" is categorical or exact. Preserve units, coordinate systems, defined terms, scoring rules, and missing-value conventions. Page numbers must come from visible page markers; otherwise null. Excerpts must be short verbatim evidence. Evaluate the document against this source taxonomy:\n${SOURCE_TAXONOMY_TEXT}`,
     input: `${context}\n\nDOCUMENT:\n${text.slice(0, 180000)}`,
     maxOutputTokens: 12000
   })
@@ -205,15 +167,15 @@ async function addRequirementEmbeddings(requirements) {
 // ── PUBLIC AUTH ROUTES (no token required) ──
 // ═══════════════════════════════════════════════
 
-app.post('/api/auth/dev-login', (req, res) => {
+app.post('/api/auth/dev-login', async (req, res) => {
   if (process.env.NODE_ENV === 'production') return res.status(404).json({ error: 'Not found' })
-  const companies = readCompanies()
+  const companies = await readCompanies()
   let company = companies.find(c => c.id === 'local-preview-company')
   if (!company) {
     company = { id: 'local-preview-company', name: 'Local Preview Company', created_at: new Date().toISOString() }
-    companies.push(company); writeCompanies(companies)
+    companies.push(company); await writeCompanies(companies)
   }
-  const users = readUsers()
+  const users = await readUsers()
   let user = users.find(u => u.id === 'local-preview-user')
   if (!user) {
     user = {
@@ -225,7 +187,7 @@ app.post('/api/auth/dev-login', (req, res) => {
       companyName: company.name,
       created_at: new Date().toISOString()
     }
-    users.push(user); writeUsers(users)
+    users.push(user); await writeUsers(users)
   }
   const publicUser = { id: user.id, name: user.name, email: user.email, role: user.role, companyId: user.companyId, companyName: user.companyName }
   const token = jwt.sign(publicUser, JWT_SECRET, { expiresIn: '1d' })
@@ -238,15 +200,15 @@ app.post('/api/auth/register', async (req, res) => {
     if (!name?.trim() || !email?.trim() || !password) return res.status(400).json({ error: 'Name, email, and password are required' })
     if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters' })
 
-    const users = readUsers()
+    const users = await readUsers()
     if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
       return res.status(409).json({ error: 'An account with this email already exists' })
     }
 
     // Passwords are deliberately hashed (not reversibly encrypted) and never stored or logged.
     const passwordHash = await bcrypt.hash(password, 12)
-    let companies = readCompanies()
-    let invites = readInvites()
+    let companies = await readCompanies()
+    let invites = await readInvites()
     const invite = inviteToken
       ? invites.find(i => i.token === inviteToken && i.email === email.toLowerCase().trim() && !i.accepted_at)
       : null
@@ -258,7 +220,7 @@ app.post('/api/auth/register', async (req, res) => {
       const resolvedName = companyName?.trim() || `${name.trim()}'s Company`
       company = { id: crypto.randomUUID(), name: resolvedName, created_at: new Date().toISOString() }
       companies.push(company)
-      writeCompanies(companies)
+      await writeCompanies(companies)
     }
     const user = {
       id: crypto.randomUUID(),
@@ -271,12 +233,12 @@ app.post('/api/auth/register', async (req, res) => {
       created_at: new Date().toISOString()
     }
     users.push(user)
-    writeUsers(users)
+    await writeUsers(users)
     if (invite) {
       invite.accepted_at = new Date().toISOString()
-      writeInvites(invites)
+      await writeInvites(invites)
     }
-    writeAudit({ event: 'account_created', userId: user.id })
+    await writeAudit({ event: 'account_created', userId: user.id })
 
     const publicUser = { id: user.id, name: user.name, email: user.email, role: user.role, companyId: user.companyId, companyName: user.companyName }
     const token = jwt.sign(publicUser, JWT_SECRET, { expiresIn: '7d' })
@@ -292,38 +254,38 @@ app.post('/api/auth/login', async (req, res) => {
     const { email, password } = req.body
     if (!email || !password) return res.status(400).json({ error: 'Email and password are required' })
 
-    const users = readUsers()
+    const users = await readUsers()
     const user = users.find(u => u.email.toLowerCase() === email.toLowerCase().trim())
     if (!user) {
-      writeAudit({ event: 'login_failed', userId: null })
+      await writeAudit({ event: 'login_failed', userId: null })
       return res.status(401).json({ error: 'Invalid email or password' })
     }
 
     const valid = await bcrypt.compare(password, user.passwordHash)
     if (!valid) {
-      writeAudit({ event: 'login_failed', userId: user.id })
+      await writeAudit({ event: 'login_failed', userId: user.id })
       return res.status(401).json({ error: 'Invalid email or password' })
     }
 
     // Migrate older accounts into a private company without exposing existing data to new accounts.
     if (!user.companyId) {
-      const companies = readCompanies()
+      const companies = await readCompanies()
       const company = { id: crypto.randomUUID(), name: `${user.name}'s Company`, created_at: new Date().toISOString() }
-      companies.push(company); writeCompanies(companies)
-      user.companyId = company.id; user.companyName = company.name; writeUsers(users)
-      const idx = readIndex()
-      idx.forEach(p => {
+      companies.push(company); await writeCompanies(companies)
+      user.companyId = company.id; user.companyName = company.name; await writeUsers(users)
+      const idx = await readIndex()
+      for (const p of idx) {
         if (!p.companyId) {
           p.companyId = company.id
-          const proposal = readProposal(p.id)
-          if (proposal && !proposal.companyId) { proposal.companyId = company.id; writeProposal(p.id, proposal) }
+          const proposal = await readProposal(p.id)
+          if (proposal && !proposal.companyId) { proposal.companyId = company.id; await writeProposal(p.id, proposal) }
         }
-      })
-      writeIndex(idx)
+      }
+      await writeIndex(idx)
     }
     const publicUser = { id: user.id, name: user.name, email: user.email, role: user.role, companyId: user.companyId, companyName: user.companyName }
     const token = jwt.sign(publicUser, JWT_SECRET, { expiresIn: '7d' })
-    writeAudit({ event: 'login_succeeded', userId: user.id })
+    await writeAudit({ event: 'login_succeeded', userId: user.id })
     res.json({ token, user: publicUser })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -333,67 +295,149 @@ app.post('/api/auth/login', async (req, res) => {
 // ═══════════════════════════════════════════════
 // ── PROTECTED ROUTES (token required) ──
 // ═══════════════════════════════════════════════
+app.get('/api/cron/source-health', async (req, res) => {
+  if (!process.env.CRON_SECRET || req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+  await runScheduledSourceHealthChecks()
+  res.json({ success: true, checkedAt: new Date().toISOString() })
+})
+
 app.use(requireAuth)
 
-function currentUser(req) {
-  return readUsers().find(u => u.id === req.user.id)
+async function currentUser(req) {
+  return (await readUsers()).find(u => u.id === req.user.id)
 }
-function companyList(req) {
-  const user = currentUser(req)
-  return readIndex().filter(p => p.companyId === user?.companyId)
+async function companyList(req) {
+  const user = await currentUser(req)
+  return (await readIndex()).filter(p => p.companyId === user?.companyId)
 }
-function canAccess(req, proposal) {
-  const user = currentUser(req)
+async function canAccess(req, proposal) {
+  const user = await currentUser(req)
   return !!user && proposal?.companyId === user.companyId
+}
+function isAdmin(user) {
+  return ['manager', 'admin'].includes(user?.role)
+}
+async function readAccessibleStandards(req) {
+  const user = await currentUser(req)
+  const shared = (await readStandards(SHARED_STANDARDS_KEY))
+    .filter(doc => (doc.sensitivity || 'public') !== 'restricted')
+    .map(doc => ({ ...doc, visibility: 'shared' }))
+  const organization = (await readStandards(user?.companyId))
+    .filter(doc => (doc.sensitivity || 'public') !== 'restricted' || isAdmin(user))
+    .map(doc => ({ ...doc, visibility: 'organization' }))
+  return [...shared, ...organization]
+}
+async function readAnalysisStandards(req) {
+  return (await readAccessibleStandards(req)).filter(doc => (doc.sensitivity || 'public') !== 'restricted')
+}
+async function standardsStoresForAdmin(user) {
+  return [
+    { key: SHARED_STANDARDS_KEY, visibility: 'shared', documents: await readStandards(SHARED_STANDARDS_KEY) },
+    { key: user.companyId, visibility: 'organization', documents: await readStandards(user.companyId) }
+  ]
+}
+async function locateStandardsDocument(user, documentId) {
+  for (const store of await standardsStoresForAdmin(user)) {
+    const doc = store.documents.find(item => item.id === documentId)
+    if (doc) return { ...store, doc }
+  }
+  return null
+}
+function publicDocument(doc, visibility = doc.visibility || 'organization') {
+  const { textContent, filePath, ...safe } = doc
+  return { ...safe, visibility, sourceCategory: documentCategory(doc) }
+}
+function isHttpUrl(value) {
+  try { return ['http:', 'https:'].includes(new URL(value).protocol) } catch { return false }
+}
+function errorStatus(error) {
+  return Number.isInteger(error?.statusCode) ? error.statusCode : 500
 }
 
 // ── Standards and site-document library ──
-app.get('/api/standards', (req, res) => {
-  res.json(readStandards(currentUser(req)?.companyId).map(({ textContent, ...doc }) => doc))
+app.get('/api/standards', async (req, res) => {
+  res.json((await readAccessibleStandards(req)).map(doc => publicDocument(doc, doc.visibility)))
+})
+
+app.get('/api/source-categories', (_req, res) => {
+  res.json(SOURCE_CATEGORIES)
+})
+
+app.get('/api/proposals/:id/analysis-sources', async (req, res) => {
+  const proposal = await readProposal(req.params.id)
+  if (!proposal) return res.status(404).json({ error: 'Proposal not found' })
+  if (!await canAccess(req, proposal)) return res.status(403).json({ error: 'Access denied' })
+  res.json(buildSourceStatus(await readAnalysisStandards(req), proposal))
 })
 
 app.post('/api/standards', upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'PDF or text file required' })
+    const user = await currentUser(req)
+    const sourceUrl = req.body.sourceUrl?.trim() || ''
+    if (!req.file && !sourceUrl) return res.status(400).json({ error: 'A PDF/text file or source URL is required' })
+    if (sourceUrl && !isHttpUrl(sourceUrl)) return res.status(400).json({ error: 'Source URL must be a valid HTTP or HTTPS URL' })
+    const sourceCategory = SOURCE_CATEGORY_KEYS.includes(req.body.sourceCategory) ? req.body.sourceCategory : 'city_engineering'
+    const sensitivity = req.body.sensitivity === 'restricted' ? 'restricted' : 'public'
+    const requestedVisibility = req.body.visibility === 'shared' ? 'shared' : 'organization'
+    if (requestedVisibility === 'shared' && !isAdmin(user)) return res.status(403).json({ error: 'Only administrators can publish shared standards' })
+    if (requestedVisibility === 'shared' && sensitivity === 'restricted') return res.status(400).json({ error: 'Restricted infrastructure data cannot be published to the shared catalog' })
     let textContent = ''
-    if (req.file.mimetype === 'application/pdf') {
-      const parsed = await require('pdf-parse')(fs.readFileSync(req.file.path))
+    const fileBuffer = req.file ? (req.file.buffer || fs.readFileSync(req.file.path)) : null
+    if (req.file?.mimetype === 'application/pdf') {
+      const parsed = await require('pdf-parse')(fileBuffer)
       textContent = parsed.text
-    } else {
-      textContent = fs.readFileSync(req.file.path, 'utf-8')
+    } else if (req.file) {
+      textContent = fileBuffer.toString('utf8')
     }
-    const companyId = currentUser(req)?.companyId
-    const docs = readStandards(companyId)
+    const storeKey = requestedVisibility === 'shared' ? SHARED_STANDARDS_KEY : user.companyId
+    const docs = await readStandards(storeKey)
+    const documentId = crypto.randomUUID()
+    const savedFile = await saveUpload(req.file, user.companyId, `standard-${documentId}`)
     const doc = {
-      id: crypto.randomUUID(),
-      title: req.body.title?.trim() || req.file.originalname,
+      id: documentId,
+      title: req.body.title?.trim() || req.file?.originalname || sourceUrl,
       documentType: req.body.documentType || 'city_standard',
+      sourceCategory,
       jurisdiction: req.body.jurisdiction?.trim() || '',
       client: req.body.client?.trim() || '',
       projectTypes: (req.body.projectTypes || '').split(',').map(x => x.trim()).filter(Boolean),
       effectiveDate: req.body.effectiveDate || null,
-      originalName: req.file.originalname,
-      filePath: req.file.path,
+      sourceUrl,
+      visibility: requestedVisibility,
+      sensitivity,
+      originalName: req.file?.originalname || null,
+      filePath: savedFile?.path || null,
+      fileStorage: savedFile?.storage || null,
+      fileContentType: savedFile?.contentType || null,
       textContent,
       requirements: [],
-      extractionStatus: 'pending',
+      extractionStatus: textContent ? 'pending' : 'url_only',
+      health: mergeHealth(null, sourceUrl
+        ? { status: 'unchecked', checkedAt: null, httpStatus: null, finalUrl: null, error: null, contentFingerprint: null, changed: false }
+        : { status: 'missing_url', checkedAt: new Date().toISOString(), httpStatus: null, finalUrl: null, error: 'No source URL is configured.', contentFingerprint: null, changed: false }),
       createdAt: new Date().toISOString(),
-      createdById: req.user.id
+      createdById: req.user.id,
+      createdByCompanyId: user.companyId
     }
-    docs.push(doc); writeStandards(companyId, docs)
-    res.json({ ...doc, textContent: undefined })
+    docs.push(doc); await writeStandards(storeKey, docs)
+    res.json(publicDocument(doc, requestedVisibility))
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    res.status(errorStatus(error)).json({ error: error.message })
   }
 })
 
 app.post('/api/standards/:documentId/extract', async (req, res) => {
   try {
-    const companyId = currentUser(req)?.companyId
-    const docs = readStandards(companyId)
-    const doc = docs.find(x => x.id === req.params.documentId)
-    if (!doc) return res.status(404).json({ error: 'Document not found' })
-    const extracted = await extractRequirements(doc.textContent, `SOURCE TYPE: ${doc.documentType}\nTITLE: ${doc.title}\nJURISDICTION: ${doc.jurisdiction}`)
+    const user = await currentUser(req)
+    const located = await locateStandardsDocument(user, req.params.documentId)
+    if (!located) return res.status(404).json({ error: 'Document not found' })
+    if (located.visibility === 'shared' && !isAdmin(user)) return res.status(403).json({ error: 'Only administrators can update shared standards' })
+    const { doc } = located
+    if (!doc.textContent) return res.status(400).json({ error: 'This URL-only source has no document text. Attach a PDF or text copy before extracting requirements.' })
+    const category = categoryDefinition(documentCategory(doc))
+    const extracted = await extractRequirements(doc.textContent, `SOURCE CATEGORY: ${category?.label || doc.documentType}\nSOURCE TYPE: ${doc.documentType}\nTITLE: ${doc.title}\nJURISDICTION: ${doc.jurisdiction}`)
     const embedded = await addRequirementEmbeddings(extracted.data.requirements)
     doc.requirements = embedded.map(rule => ({ ...rule, documentId: doc.id }))
     doc.detectedJurisdiction = extracted.data.jurisdiction
@@ -401,60 +445,160 @@ app.post('/api/standards/:documentId/extract', async (req, res) => {
     doc.extractionStatus = 'complete'
     doc.extractedAt = new Date().toISOString()
     doc.openai = { responseId: extracted.responseId, model: extracted.model }
-    writeStandards(companyId, docs)
-    res.json({ ...doc, textContent: undefined })
+    await writeStandards(located.key, located.documents)
+    res.json(publicDocument(doc, located.visibility))
   } catch (error) {
-    res.status(500).json({ error: error.message })
+    res.status(errorStatus(error)).json({ error: error.message })
   }
 })
 
-app.delete('/api/standards/:documentId', (req, res) => {
-  const companyId = currentUser(req)?.companyId
-  const docs = readStandards(companyId)
-  const doc = docs.find(x => x.id === req.params.documentId)
-  if (!doc) return res.status(404).json({ error: 'Document not found' })
-  if (doc.filePath && fs.existsSync(doc.filePath)) fs.unlinkSync(doc.filePath)
-  writeStandards(companyId, docs.filter(x => x.id !== doc.id))
+app.patch('/api/standards/:documentId', async (req, res) => {
+  const user = await currentUser(req)
+  if (!isAdmin(user)) return res.status(403).json({ error: 'Administrator access required' })
+  const located = await locateStandardsDocument(user, req.params.documentId)
+  if (!located) return res.status(404).json({ error: 'Document not found' })
+  if (req.body.sourceUrl?.trim() && !isHttpUrl(req.body.sourceUrl.trim())) return res.status(400).json({ error: 'Source URL must be a valid HTTP or HTTPS URL' })
+  const allowed = ['title', 'jurisdiction', 'client', 'sourceUrl', 'sourceCategory']
+  for (const key of allowed) {
+    if (req.body[key] === undefined) continue
+    if (key === 'sourceCategory' && !SOURCE_CATEGORY_KEYS.includes(req.body[key])) return res.status(400).json({ error: 'Unknown source category' })
+    located.doc[key] = typeof req.body[key] === 'string' ? req.body[key].trim() : req.body[key]
+  }
+  if (req.body.sourceUrl !== undefined) {
+    located.doc.health = req.body.sourceUrl?.trim()
+      ? mergeHealth(null, { status: 'unchecked', checkedAt: null, httpStatus: null, finalUrl: null, error: 'This source has not been checked yet.', contentFingerprint: null, changed: false })
+      : mergeHealth(null, { status: 'missing_url', checkedAt: new Date().toISOString(), httpStatus: null, finalUrl: null, error: 'No source URL is configured.', contentFingerprint: null, changed: false })
+  }
+  located.doc.updatedAt = new Date().toISOString()
+  await writeStandards(located.key, located.documents)
+  await writeAudit({ event: 'source_metadata_updated', userId: user.id, documentId: located.doc.id })
+  res.json(publicDocument(located.doc, located.visibility))
+})
+
+app.delete('/api/standards/:documentId', async (req, res) => {
+  const user = await currentUser(req)
+  const located = await locateStandardsDocument(user, req.params.documentId)
+  if (!located) return res.status(404).json({ error: 'Document not found' })
+  if (located.visibility === 'shared' && !isAdmin(user)) return res.status(403).json({ error: 'Only administrators can remove shared standards' })
+  const { doc } = located
+  await deleteUpload(doc.filePath, doc.fileStorage)
+  await writeStandards(located.key, located.documents.filter(x => x.id !== doc.id))
   res.json({ success: true })
 })
 
-app.get('/api/auth/me', (req, res) => {
-  const users = readUsers()
+function effectiveHealth(doc) {
+  if (doc.health) return doc.health
+  return doc.sourceUrl
+    ? { status: 'unchecked', checkedAt: null, httpStatus: null, finalUrl: null, error: 'This source has not been checked yet.', changed: false, acknowledgedAt: null }
+    : { status: 'missing_url', checkedAt: null, httpStatus: null, finalUrl: null, error: 'No source URL is configured.', changed: false, acknowledgedAt: null }
+}
+
+async function healthPayload(user) {
+  const sources = (await standardsStoresForAdmin(user)).flatMap(store => store.documents.map(doc => ({
+    ...publicDocument(doc, store.visibility),
+    health: effectiveHealth(doc)
+  })))
+  const notifications = sources
+    .filter(source => source.health.status !== 'healthy' && !source.health.acknowledgedAt)
+    .map(source => ({
+      id: `${source.id}:${source.health.status}`,
+      documentId: source.id,
+      title: source.title,
+      visibility: source.visibility,
+      sourceCategory: source.sourceCategory,
+      severity: source.health.status === 'broken' ? 'critical' : 'warning',
+      type: source.health.status,
+      message: source.health.error || (source.health.status === 'changed' ? 'The source headers or destination changed since the last successful check.' : 'Source requires attention.'),
+      detectedAt: source.health.firstDetectedAt || source.health.checkedAt || source.createdAt
+    }))
+  const counts = { healthy: 0, broken: 0, changed: 0, missing_url: 0, unchecked: 0 }
+  for (const source of sources) counts[source.health.status] = (counts[source.health.status] || 0) + 1
+  return { counts, notificationCount: notifications.length, notifications, sources, categories: SOURCE_CATEGORIES }
+}
+
+async function checkStandardsStore(storeKey, documentIds = null) {
+  const documents = await readStandards(storeKey)
+  const targets = documentIds ? documents.filter(doc => documentIds.includes(doc.id)) : documents
+  for (let index = 0; index < targets.length; index += 4) {
+    const batch = targets.slice(index, index + 4)
+    const checks = await Promise.all(batch.map(doc => checkSourceUrl(doc.sourceUrl, effectiveHealth(doc))))
+    batch.forEach((doc, batchIndex) => { doc.health = mergeHealth(effectiveHealth(doc), checks[batchIndex]) })
+  }
+  await writeStandards(storeKey, documents)
+  return targets.length
+}
+
+app.get('/api/admin/source-health', async (req, res) => {
+  const user = await currentUser(req)
+  if (!isAdmin(user)) return res.status(403).json({ error: 'Administrator access required' })
+  res.json(await healthPayload(user))
+})
+
+app.post('/api/admin/source-health/check', async (req, res) => {
+  const user = await currentUser(req)
+  if (!isAdmin(user)) return res.status(403).json({ error: 'Administrator access required' })
+  try {
+    const requestedId = req.body.documentId || null
+    let checked = 0
+    for (const store of await standardsStoresForAdmin(user)) {
+      checked += await checkStandardsStore(store.key, requestedId ? [requestedId] : null)
+    }
+    await writeAudit({ event: 'source_health_check', userId: user.id, checked })
+    res.json({ checked, ...await healthPayload(user) })
+  } catch (error) {
+    res.status(errorStatus(error)).json({ error: error.message })
+  }
+})
+
+app.post('/api/admin/source-health/:documentId/acknowledge', async (req, res) => {
+  const user = await currentUser(req)
+  if (!isAdmin(user)) return res.status(403).json({ error: 'Administrator access required' })
+  const located = await locateStandardsDocument(user, req.params.documentId)
+  if (!located) return res.status(404).json({ error: 'Source not found' })
+  const current = effectiveHealth(located.doc)
+  located.doc.health = { ...current, acknowledgedAt: new Date().toISOString(), acknowledgedById: user.id }
+  await writeStandards(located.key, located.documents)
+  await writeAudit({ event: 'source_health_acknowledged', userId: user.id, documentId: located.doc.id })
+  res.json({ success: true })
+})
+
+app.get('/api/auth/me', async (req, res) => {
+  const users = await readUsers()
   const user = users.find(u => u.id === req.user.id)
   if (!user) return res.status(404).json({ error: 'User not found' })
   res.json({ id: user.id, name: user.name, email: user.email, role: user.role, companyId: user.companyId, companyName: user.companyName })
 })
 
-app.get('/api/company', (req, res) => {
-  const user = currentUser(req)
-  const company = readCompanies().find(c => c.id === user?.companyId)
-  const members = readUsers().filter(u => u.companyId === user?.companyId).map(u => ({ id: u.id, name: u.name, email: u.email, role: u.role }))
-  const invites = readInvites().filter(i => i.companyId === user?.companyId && !i.accepted_at).map(({ token, ...i }) => i)
+app.get('/api/company', async (req, res) => {
+  const user = await currentUser(req)
+  const company = (await readCompanies()).find(c => c.id === user?.companyId)
+  const members = (await readUsers()).filter(u => u.companyId === user?.companyId).map(u => ({ id: u.id, name: u.name, email: u.email, role: u.role }))
+  const invites = (await readInvites()).filter(i => i.companyId === user?.companyId && !i.accepted_at).map(({ token, ...i }) => i)
   res.json({ company, members, invites })
 })
 
-app.post('/api/company/invites', (req, res) => {
-  const user = currentUser(req)
+app.post('/api/company/invites', async (req, res) => {
+  const user = await currentUser(req)
   if (user?.role !== 'manager') return res.status(403).json({ error: 'Only company managers can invite members' })
   const email = req.body.email?.toLowerCase().trim()
   if (!email) return res.status(400).json({ error: 'Email is required' })
-  if (readUsers().some(u => u.email === email)) return res.status(409).json({ error: 'That email already has an account' })
-  const invites = readInvites()
+  if ((await readUsers()).some(u => u.email === email)) return res.status(409).json({ error: 'That email already has an account' })
+  const invites = await readInvites()
   const existing = invites.find(i => i.companyId === user.companyId && i.email === email && !i.accepted_at)
   if (existing) return res.json({ success: true, inviteToken: existing.token })
   const invite = { id: crypto.randomUUID(), token: crypto.randomBytes(24).toString('hex'), companyId: user.companyId, email, role: 'reviewer', invitedById: user.id, created_at: new Date().toISOString() }
-  invites.push(invite); writeInvites(invites)
+  invites.push(invite); await writeInvites(invites)
   res.json({ success: true, inviteToken: invite.token })
 })
 
-app.get('/api/clients', (req, res) => {
-  const clients = [...new Set(companyList(req).map(p => p.company).filter(Boolean))].sort()
+app.get('/api/clients', async (req, res) => {
+  const clients = [...new Set((await companyList(req)).map(p => p.company).filter(Boolean))].sort()
   res.json(clients)
 })
 
-app.get('/api/profile/usage', (req, res) => {
+app.get('/api/profile/usage', async (req, res) => {
   const now = Date.now()
-  const requests = readAudit()
+  const requests = (await readAudit())
     .filter(entry => entry.event === 'api_request' && entry.userId === req.user.id)
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
   const since = days => requests.filter(entry => now - new Date(entry.timestamp).getTime() < days * 86400000)
@@ -484,16 +628,16 @@ app.get('/api/profile/usage', (req, res) => {
 })
 
 // List all users (for assignment dropdown)
-app.get('/api/users', (req, res) => {
-  const me = currentUser(req)
-  const users = readUsers().filter(u => u.companyId === me?.companyId).map(u => ({ id: u.id, name: u.name, email: u.email, role: u.role }))
+app.get('/api/users', async (req, res) => {
+  const me = await currentUser(req)
+  const users = (await readUsers()).filter(u => u.companyId === me?.companyId).map(u => ({ id: u.id, name: u.name, email: u.email, role: u.role }))
   res.json(users)
 })
 
 // My workload: proposals assigned to me + unassigned ones I can pick up
-app.get('/api/me/proposals', (req, res) => {
+app.get('/api/me/proposals', async (req, res) => {
   const userId = req.user.id
-  const list = companyList(req)
+  const list = await companyList(req)
   const mine = list.filter(p => p.assignedToId === userId)
   const available = list.filter(p => !p.assignedToId && !['accepted', 'rejected'].includes(p.status))
   const recent = [...list].filter(p => p.assignedToId !== userId).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, 10)
@@ -505,9 +649,9 @@ app.get('/api/me/proposals', (req, res) => {
 })
 
 // ── Proposals ──
-app.get('/api/proposals', (req, res) => {
+app.get('/api/proposals', async (req, res) => {
   const { search, status, location, company, assignedToId } = req.query
-  let list = companyList(req)
+  let list = await companyList(req)
   if (search) { const q = search.toLowerCase(); list = list.filter(p => [p.name, p.company, p.location].some(v => (v || '').toLowerCase().includes(q))) }
   if (status) list = list.filter(p => p.status === status)
   if (location) list = list.filter(p => (p.location || '').toLowerCase().includes(location.toLowerCase()))
@@ -517,17 +661,17 @@ app.get('/api/proposals', (req, res) => {
   res.json(list)
 })
 
-app.use('/api/proposals/:id', (req, res, next) => {
-  const proposal = readProposal(req.params.id)
+app.use('/api/proposals/:id', async (req, res, next) => {
+  const proposal = await readProposal(req.params.id)
   if (!proposal) return res.status(404).json({ error: 'Not found' })
-  if (!canAccess(req, proposal)) return res.status(403).json({ error: 'Access denied' })
+  if (!await canAccess(req, proposal)) return res.status(403).json({ error: 'Access denied' })
   next()
 })
 
-app.get('/api/proposals/:id', (req, res) => {
-  const p = readProposal(req.params.id)
+app.get('/api/proposals/:id', async (req, res) => {
+  const p = await readProposal(req.params.id)
   if (!p) return res.status(404).json({ error: 'Not found' })
-  if (!canAccess(req, p)) return res.status(403).json({ error: 'Access denied' })
+  if (!await canAccess(req, p)) return res.status(403).json({ error: 'Access denied' })
   res.json(p)
 })
 
@@ -536,106 +680,125 @@ app.post('/api/proposals', upload.single('file'), async (req, res) => {
     const { name, company, location } = req.body
     if (!name) return res.status(400).json({ error: 'Name required' })
     const id = crypto.randomUUID()
+    const user = await currentUser(req)
     let text = req.body.text_content || ''
     let filePath = null
+    let fileStorage = null
+    let fileContentType = null
 
     if (req.file) {
-      filePath = req.file.path
+      const fileBuffer = req.file.buffer || fs.readFileSync(req.file.path)
       if (req.file.mimetype === 'application/pdf') {
-        try { const d = await require('pdf-parse')(fs.readFileSync(req.file.path)); text = d.text }
+        try { const d = await require('pdf-parse')(fileBuffer); text = d.text }
         catch { text = '[PDF uploaded — text extraction unavailable. Add sections manually.]' }
-      } else { text = fs.readFileSync(req.file.path, 'utf-8') }
+      } else { text = fileBuffer.toString('utf8') }
+      const savedFile = await saveUpload(req.file, user.companyId, id)
+      filePath = savedFile.path
+      fileStorage = savedFile.storage
+      fileContentType = savedFile.contentType
     }
 
     const now = new Date().toISOString()
     const proposal = {
       id, name, company: company || '', location: location || '',
-      status: 'pending', file_path: filePath, text_content: text,
+      status: 'pending', file_path: filePath, file_storage: fileStorage, file_content_type: fileContentType, text_content: text,
       sections: detectSections(text), highlights: [],
-      createdById: req.user.id, createdByName: req.user.name, companyId: currentUser(req)?.companyId,
+      createdById: req.user.id, createdByName: req.user.name, companyId: user?.companyId,
       created_at: now, updated_at: now
     }
-    writeProposal(id, proposal)
-    const idx = readIndex()
+    await writeProposal(id, proposal)
+    const idx = await readIndex()
     idx.push({ id, name, company: proposal.company, location: proposal.location, status: proposal.status, companyId: proposal.companyId, created_at: now, updated_at: now })
-    writeIndex(idx)
+    await writeIndex(idx)
     res.json({ id, sections: proposal.sections })
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }) }
 })
 
-app.put('/api/proposals/:id', (req, res) => {
-  const p = readProposal(req.params.id)
+app.put('/api/proposals/:id', async (req, res) => {
+  const p = await readProposal(req.params.id)
   if (!p) return res.status(404).json({ error: 'Not found' })
   const allowed = ['name', 'company', 'location', 'status', 'sections', 'highlights', 'diagramAnalysis', 'assignedTo', 'assignedToId', 'dueDate', 'priority']
   for (const k of allowed) { if (req.body[k] !== undefined) p[k] = req.body[k] }
   p.updated_at = new Date().toISOString()
-  writeProposal(req.params.id, p)
-  const idx = readIndex().map(i => i.id === req.params.id
+  await writeProposal(req.params.id, p)
+  const idx = (await readIndex()).map(i => i.id === req.params.id
     ? { ...i, name: p.name, company: p.company, location: p.location, status: p.status, assignedTo: p.assignedTo || '', assignedToId: p.assignedToId || '', dueDate: p.dueDate || '', priority: p.priority || '', updated_at: p.updated_at }
     : i)
-  writeIndex(idx)
+  await writeIndex(idx)
   res.json({ success: true })
 })
 
-app.delete('/api/proposals/:id', (req, res) => {
-  const p = readProposal(req.params.id)
-  if (p?.file_path && fs.existsSync(p.file_path)) fs.unlinkSync(p.file_path)
-  const f = path.join(DATA_DIR, `${req.params.id}.json`)
-  if (fs.existsSync(f)) fs.unlinkSync(f)
-  writeIndex(readIndex().filter(i => i.id !== req.params.id))
+app.delete('/api/proposals/:id', async (req, res) => {
+  const p = await readProposal(req.params.id)
+  await Promise.all([
+    deleteUpload(p?.file_path, p?.file_storage),
+    ...(p?.versions || []).map(version => deleteUpload(version.file_path, version.file_storage))
+  ])
+  await deleteProposal(req.params.id)
+  await writeIndex((await readIndex()).filter(i => i.id !== req.params.id))
   res.json({ success: true })
 })
 
-app.post('/api/proposals/:id/sections', (req, res) => {
-  const p = readProposal(req.params.id)
+app.post('/api/proposals/:id/sections', async (req, res) => {
+  const p = await readProposal(req.params.id)
   if (!p) return res.status(404).json({ error: 'Not found' })
   const sec = { id: crypto.randomUUID(), title: req.body.title || 'New Section', startLine: req.body.startLine ?? 0, score: 'green', notes: '', statutes: [] }
   p.sections.push(sec)
   p.updated_at = new Date().toISOString()
-  writeProposal(req.params.id, p)
-  writeIndex(readIndex().map(i => i.id === req.params.id ? { ...i, updated_at: p.updated_at } : i))
+  await writeProposal(req.params.id, p)
+  await writeIndex((await readIndex()).map(i => i.id === req.params.id ? { ...i, updated_at: p.updated_at } : i))
   res.json(sec)
 })
 
 // ── Serve proposal file (token accepted as query param for iframe) ──
-app.get('/api/proposals/:id/file', (req, res) => {
-  const p = readProposal(req.params.id)
+app.get('/api/proposals/:id/file', async (req, res) => {
+  const p = await readProposal(req.params.id)
   if (!p) return res.status(404).json({ error: 'Not found' })
   let filePath
   const vIdx = req.query.version
   if (vIdx !== undefined && p.versions?.length) {
     const v = p.versions[parseInt(vIdx)]
     if (!v?.file_path) return res.status(404).json({ error: 'Version not found' })
-    filePath = path.resolve(v.file_path)
+    filePath = v.file_path
+    var fileStorage = v.file_storage || p.file_storage
+    var fileContentType = v.file_content_type || p.file_content_type
   } else {
     if (!p.file_path) return res.status(404).json({ error: 'No file attached' })
-    filePath = path.resolve(p.file_path)
+    filePath = p.file_path
+    var fileStorage = p.file_storage
+    var fileContentType = p.file_content_type
   }
-  const uploadsDir = path.resolve(UPLOADS)
-  if (!filePath.startsWith(uploadsDir)) return res.status(403).json({ error: 'Access denied' })
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found on disk' })
-  res.setHeader('Content-Disposition', 'inline')
-  res.sendFile(filePath)
+  try {
+    const contents = await readUpload(filePath, fileStorage)
+    res.setHeader('Content-Type', fileContentType || 'application/pdf')
+    res.setHeader('Content-Disposition', 'inline')
+    res.send(contents)
+  } catch {
+    res.status(404).json({ error: 'File not found in storage' })
+  }
 })
 
 // ── Upload new document version ──
 app.post('/api/proposals/:id/versions', upload.single('file'), async (req, res) => {
   try {
-    const p = readProposal(req.params.id)
+    const p = await readProposal(req.params.id)
     if (!p) return res.status(404).json({ error: 'Not found' })
     if (!req.file) return res.status(400).json({ error: 'File required' })
     const versions = p.versions || []
-    if (p.file_path) versions.push({ version: versions.length + 1, label: req.body.label || `v${versions.length + 1}`, file_path: p.file_path, uploaded_at: p.updated_at || p.created_at, uploadedById: req.user.id, uploadedByName: req.user.name })
+    if (p.file_path) versions.push({ version: versions.length + 1, label: req.body.label || `v${versions.length + 1}`, file_path: p.file_path, file_storage: p.file_storage, file_content_type: p.file_content_type, uploaded_at: p.updated_at || p.created_at, uploadedById: req.user.id, uploadedByName: req.user.name })
+    const fileBuffer = req.file.buffer || fs.readFileSync(req.file.path)
     let text = ''
     if (req.file.mimetype === 'application/pdf') {
-      try { const d = await require('pdf-parse')(fs.readFileSync(req.file.path)); text = d.text }
+      try { const d = await require('pdf-parse')(fileBuffer); text = d.text }
       catch { text = '[PDF uploaded — text extraction unavailable.]' }
-    } else { text = fs.readFileSync(req.file.path, 'utf-8') }
+    } else { text = fileBuffer.toString('utf8') }
     const now = new Date().toISOString()
-    p.file_path = req.file.path; p.text_content = text; p.versions = versions; p.updated_at = now
+    const savedFile = await saveUpload(req.file, p.companyId, p.id)
+    p.file_path = savedFile.path; p.file_storage = savedFile.storage; p.file_content_type = savedFile.contentType
+    p.text_content = text; p.versions = versions; p.updated_at = now
     if (req.body.resetSections === 'true') p.sections = detectSections(text)
-    writeProposal(req.params.id, p)
-    writeIndex(readIndex().map(i => i.id === req.params.id ? { ...i, updated_at: now } : i))
+    await writeProposal(req.params.id, p)
+    await writeIndex((await readIndex()).map(i => i.id === req.params.id ? { ...i, updated_at: now } : i))
     res.json({ success: true, versionCount: versions.length + 1 })
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }) }
 })
@@ -643,16 +806,16 @@ app.post('/api/proposals/:id/versions', upload.single('file'), async (req, res) 
 // ── Full deterministic compliance analysis ──
 app.post('/api/proposals/:id/compliance-review', async (req, res) => {
   try {
-    const p = readProposal(req.params.id)
-    const docs = readStandards(currentUser(req)?.companyId)
-      .filter(doc => doc.extractionStatus === 'complete')
-      .filter(doc => {
-        const jurisdictionMatch = !doc.jurisdiction || (p.location || '').toLowerCase().includes(doc.jurisdiction.toLowerCase()) ||
-          doc.jurisdiction.toLowerCase().includes((p.location || '').toLowerCase())
-        const clientMatch = !doc.client || (p.company || '').toLowerCase() === doc.client.toLowerCase()
-        return jurisdictionMatch && clientMatch
-      })
-    if (!docs.length) return res.status(400).json({ error: 'No extracted standards or site reports match this proposal jurisdiction/client.' })
+    const p = await readProposal(req.params.id)
+    const allDocs = await readAnalysisStandards(req)
+    const sourceStatus = buildSourceStatus(allDocs, p)
+    const docs = matchingDocuments(allDocs, p)
+    if (!docs.length) return res.status(400).json({
+      error: allDocs.length
+        ? 'No extracted library sources match this proposal location and client. Check the source tags or extract pending documents.'
+        : 'The standards repository is empty. Upload and extract standards or site reports before running the comparison.',
+      sourceStatus
+    })
 
     const extracted = await extractRequirements(p.text_content || '', `PROPOSAL: ${p.name}\nCLIENT: ${p.company}\nSUBMITTED LOCATION: ${p.location}\nExtract submitted design values, not governing standards.`)
     const proposalRequirements = await addRequirementEmbeddings(extracted.data.requirements)
@@ -667,6 +830,7 @@ app.post('/api/proposals/:id/compliance-review', async (req, res) => {
       projectScope: extracted.data.projectScope,
       proposalRequirements,
       matchedDocumentIds: docs.map(x => x.id),
+      sourceStatus,
       matrix,
       summary,
       generatedAt: new Date().toISOString(),
@@ -674,28 +838,27 @@ app.post('/api/proposals/:id/compliance-review', async (req, res) => {
       decisionPolicy: 'City/client baseline; site-specific source controls only when deterministically stricter; conflicts require engineer review.'
     }
     p.updated_at = new Date().toISOString()
-    writeProposal(p.id, p)
+    await writeProposal(p.id, p)
     res.json(p.complianceReview)
   } catch (error) {
     console.error('Compliance review error:', error.message)
-    res.status(500).json({ error: error.message })
+    res.status(errorStatus(error)).json({ error: error.message })
   }
 })
 
 // ── Diagram analysis ──
 app.post('/api/proposals/:id/analyze-diagrams', async (req, res) => {
-  const p = readProposal(req.params.id)
+  const p = await readProposal(req.params.id)
   if (!p) return res.status(404).json({ error: 'Not found' })
   if (!p.file_path) return res.status(400).json({ error: 'No PDF file attached' })
-  const filePath = path.resolve(p.file_path)
-  const uploadsDir = path.resolve(UPLOADS)
-  if (!filePath.startsWith(uploadsDir) || !fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' })
-  if (fs.statSync(filePath).size > 25 * 1024 * 1024) return res.status(400).json({ error: 'File too large (max 25MB)' })
+  let fileBuffer
+  try { fileBuffer = await readUpload(p.file_path, p.file_storage) } catch { return res.status(404).json({ error: 'File not found' }) }
+  if (fileBuffer.length > 25 * 1024 * 1024) return res.status(400).json({ error: 'File too large (max 25MB)' })
 
   try {
     const diagramSchema = {
       type: 'object', additionalProperties: false,
-      required: ['summary', 'diagrams', 'overallCompliance', 'criticalIssues', 'recommendations'],
+      required: ['summary', 'diagrams', 'overallCompliance', 'criticalIssues', 'recommendations', 'researchFindings'],
       properties: {
         summary: { type: 'string' },
         diagrams: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['type', 'description', 'location', 'concerns', 'positives', 'compliance', 'missingElements', 'codes'], properties: {
@@ -706,28 +869,70 @@ app.post('/api/proposals/:id/analyze-diagrams', async (req, res) => {
         }}},
         overallCompliance: { type: 'string', enum: ['green', 'yellow', 'red'] },
         criticalIssues: { type: 'array', items: { type: 'string' } },
-        recommendations: { type: 'array', items: { type: 'string' } }
+        recommendations: { type: 'array', items: { type: 'string' } },
+        researchFindings: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['category', 'finding', 'sourceTitle', 'sourceUrl', 'confidence'], properties: {
+          category: { type: 'string', enum: SOURCE_CATEGORY_KEYS },
+          finding: { type: 'string' }, sourceTitle: { type: 'string' }, sourceUrl: { type: 'string' },
+          confidence: { type: 'string', enum: ['high', 'medium', 'low'] }
+        }}}
       }
     }
+    const allDocs = await readAnalysisStandards(req)
+    const sourceStatus = buildSourceStatus(allDocs, p)
+    const matchedDocs = matchingDocuments(allDocs, p)
+    const libraryRequirements = matchedDocs.flatMap(doc => (doc.requirements || []).map(rule => ({
+      documentId: doc.id,
+      documentTitle: doc.title,
+      documentType: doc.documentType,
+      sourceCategory: documentCategory(doc),
+      visibility: doc.visibility,
+      sensitivity: doc.sensitivity || 'public',
+      sourceUrl: doc.sourceUrl || null,
+      jurisdiction: doc.jurisdiction,
+      category: rule.category,
+      subject: rule.subject,
+      description: rule.description,
+      value: rule.value,
+      unit: rule.unit,
+      comparison: rule.comparison,
+      page: rule.page,
+      excerpt: rule.excerpt,
+      definition: rule.definition,
+      coordinateSystem: rule.coordinateSystem,
+      scoringRule: rule.scoringRule,
+      missingValueConvention: rule.missingValueConvention
+    }))).slice(0, 160)
     const analyzed = await structuredResponse({
       name: 'diagram_analysis', schema: diagramSchema,
-      instructions: 'Analyze every visible civil plan, detail, section, table, and diagram. Cite page or sheet identifiers. Do not invent a code requirement or claim compliance with an unavailable source.',
+      instructions: `Assist a licensed civil engineer and public-procurement reviewer. Analyze every visible plan, detail, section, table, schedule, form, and contract provision and cite page or sheet identifiers. Compare against the supplied extracted library requirements. Research the project location and governing agencies using allowed authoritative domains. Cover this complete taxonomy:\n${SOURCE_TAXONOMY_TEXT}\nNever invent a requirement, condition, URL, or compliance conclusion. Distinguish controlling adopted requirements from informational evidence. If a needed source is unavailable, stale, or its location relevance cannot be established, mark it missing and use yellow rather than claiming compliance. Apply vendor criteria only when legally permissible. Never expose, summarize, or search for restricted utility or critical-infrastructure details. Research findings are screening evidence, not a substitute for a site-specific stamped report or legal determination.`,
       input: [{ role: 'user', content: [
-        { type: 'input_file', filename: path.basename(filePath), file_data: `data:application/pdf;base64,${fs.readFileSync(filePath).toString('base64')}` },
-        { type: 'input_text', text: `Review ${p.name}, ${p.company || ''}, ${p.location || ''}.` }
+        { type: 'input_file', filename: p.file_path.split('/').pop(), file_data: `data:application/pdf;base64,${fileBuffer.toString('base64')}` },
+        { type: 'input_text', text: `Review ${p.name}, ${p.company || ''}, ${p.location || ''}.\n\nMATCHED EXTRACTED LIBRARY REQUIREMENTS:\n${JSON.stringify(libraryRequirements)}` }
       ]}],
-      maxOutputTokens: 8000
+      maxOutputTokens: 10000,
+      webSearchDomains: [...new Set([
+        ...(process.env.ANALYSIS_SOURCE_DOMAINS || RESEARCH_DOMAINS.join(',')).split(',').map(domain => domain.trim()).filter(Boolean),
+        ...researchDomainsForDocuments(matchedDocs)
+      ])].slice(0, 100)
     })
-    const result = { ...analyzed.data, generatedAt: new Date().toISOString(), openai: { responseId: analyzed.responseId, model: analyzed.model } }
+    const verifiedUrls = new Set((analyzed.sources || []).map(source => source.url))
+    const result = {
+      ...analyzed.data,
+      researchFindings: (analyzed.data.researchFindings || []).filter(finding => verifiedUrls.has(finding.sourceUrl)),
+      sourceStatus,
+      webSources: analyzed.sources || [],
+      generatedAt: new Date().toISOString(),
+      openai: { responseId: analyzed.responseId, model: analyzed.model }
+    }
     p.diagramAnalysis = result; p.updated_at = new Date().toISOString()
-    writeProposal(req.params.id, p)
+    await writeProposal(req.params.id, p)
     res.json(result)
-  } catch (e) { console.error('Diagram analysis error:', e.message); res.status(500).json({ error: e.message }) }
+  } catch (e) { console.error('Diagram analysis error:', e.message); res.status(errorStatus(e)).json({ error: e.message }) }
 })
 
 // ── AI section review ──
 app.post('/api/proposals/:id/ai-review', async (req, res) => {
-  const p = readProposal(req.params.id)
+  const p = await readProposal(req.params.id)
   if (!p) return res.status(404).json({ error: 'Proposal not found' })
   const { sectionId } = req.body
   const secIdx = p.sections.findIndex(s => s.id === sectionId)
@@ -739,9 +944,17 @@ app.post('/api/proposals/:id/ai-review', async (req, res) => {
   const contextText = sectionText || (p.text_content || '').slice(0, 5000)
 
   try {
-    const docs = readStandards(currentUser(req)?.companyId).filter(x => x.extractionStatus === 'complete')
+    const allDocs = await readAnalysisStandards(req)
+    const docs = matchingDocuments(allDocs, p)
+    const sourceStatus = buildSourceStatus(allDocs, p)
+    if (!docs.length) return res.status(400).json({
+      error: allDocs.length
+        ? 'No extracted library sources match this proposal location and client.'
+        : 'The standards repository is empty. Upload and extract sources before running AI review.',
+      sourceStatus
+    })
     const sources = docs.flatMap(doc => (doc.requirements || []).map(rule => ({
-      title: doc.title, jurisdiction: doc.jurisdiction, page: rule.page, description: rule.description,
+      title: doc.title, sourceCategory: documentCategory(doc), jurisdiction: doc.jurisdiction, page: rule.page, description: rule.description,
       value: rule.value, unit: rule.unit, excerpt: rule.excerpt
     }))).slice(0, 80)
     const schema = {
@@ -755,19 +968,19 @@ app.post('/api/proposals/:id/ai-review', async (req, res) => {
     }
     const reviewed = await structuredResponse({
       name: 'section_review', schema,
-      instructions: 'Assist an engineer. Use only supplied sources. If a controlling comparison is not deterministic, score yellow. Never fabricate a citation or URL.',
+      instructions: `Assist an engineer and public-procurement reviewer. Use only supplied sources and consider the complete source taxonomy below. If a controlling comparison is not deterministic or a relevant category is missing, score yellow. Apply vendor criteria only when legally permissible. Never fabricate a citation or URL and never expose sensitive infrastructure data.\n${SOURCE_TAXONOMY_TEXT}`,
       input: `PROPOSAL: ${p.name}\nLOCATION: ${p.location}\nSECTION: ${sec.title}\n${contextText}\n\nRETRIEVED LIBRARY REQUIREMENTS:\n${JSON.stringify(sources)}`,
       maxOutputTokens: 2500
     })
-    res.json({ ...reviewed.data, generatedAt: new Date().toISOString(), openai: { responseId: reviewed.responseId, model: reviewed.model } })
-  } catch (e) { console.error('AI review error:', e.message); res.status(500).json({ error: e.message }) }
+    res.json({ ...reviewed.data, sourceStatus, generatedAt: new Date().toISOString(), openai: { responseId: reviewed.responseId, model: reviewed.model } })
+  } catch (e) { console.error('AI review error:', e.message); res.status(errorStatus(e)).json({ error: e.message }) }
 })
 
 // ── Dashboard stats ──
-app.get('/api/dashboard', (req, res) => {
-  const list = companyList(req)
-  const me = currentUser(req)
-  const users = readUsers().filter(u => u.companyId === me?.companyId).map(u => ({ id: u.id, name: u.name, email: u.email, role: u.role }))
+app.get('/api/dashboard', async (req, res) => {
+  const list = await companyList(req)
+  const me = await currentUser(req)
+  const users = (await readUsers()).filter(u => u.companyId === me?.companyId).map(u => ({ id: u.id, name: u.name, email: u.email, role: u.role }))
   const statuses = ['pending', 'in_review', 'needs_updates', 'accepted', 'rejected']
   const statusCounts = Object.fromEntries(statuses.map(s => [s, 0]))
   const locationCounts = {}
@@ -790,11 +1003,34 @@ app.get('/api/dashboard', (req, res) => {
   res.json({ statusCounts, locationCounts, reviewerCounts, priorityCounts, total: list.length, recent, users })
 })
 
+let sourceMonitorRunning = false
+async function runScheduledSourceHealthChecks() {
+  if (sourceMonitorRunning) return
+  sourceMonitorRunning = true
+  try {
+    const storeKeys = await standardStoreKeys()
+    for (const storeKey of storeKeys) await checkStandardsStore(storeKey)
+    await writeAudit({ event: 'scheduled_source_health_check', checkedStores: storeKeys.length })
+  } catch (error) {
+    console.error('Scheduled source health check failed:', error.message)
+  } finally {
+    sourceMonitorRunning = false
+  }
+}
+
+app.use((error, _req, res, _next) => {
+  console.error('Unhandled API error:', error.message)
+  if (res.headersSent) return
+  res.status(errorStatus(error)).json({ error: error.message || 'Unexpected server error' })
+})
+
 if (require.main === module) {
   const port = Number(process.env.PORT || 3001)
   app.listen(port, () => console.log(`API: http://localhost:${port}`))
+  const configuredInterval = Number(process.env.SOURCE_HEALTH_CHECK_INTERVAL_MS || 21600000)
+  const intervalMs = Number.isFinite(configuredInterval) ? Math.max(configuredInterval, 300000) : 21600000
+  setTimeout(runScheduledSourceHealthChecks, 30000).unref()
+  setInterval(runScheduledSourceHealthChecks, intervalMs).unref()
 }
-
-module.exports = app
 
 module.exports = app

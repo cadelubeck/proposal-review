@@ -7,6 +7,14 @@ function apiKey() {
   return key
 }
 
+function requireAiEnabled() {
+  if (process.env.AI_ENABLED !== 'true') {
+    const error = new Error('AI analysis is disabled to prevent usage charges. An administrator must explicitly set AI_ENABLED=true after approving an API budget.')
+    error.statusCode = 503
+    throw error
+  }
+}
+
 function responseText(payload) {
   if (payload.output_text) return payload.output_text
   return (payload.output || [])
@@ -16,37 +24,61 @@ function responseText(payload) {
     .join('')
 }
 
-async function structuredResponse({ name, schema, instructions, input, maxOutputTokens = 5000 }) {
+function responseSources(payload) {
+  const sources = []
+  for (const item of payload.output || []) {
+    for (const source of item.action?.sources || []) {
+      if (source.url) sources.push({ title: source.title || source.url, url: source.url })
+    }
+    for (const content of item.content || []) {
+      for (const annotation of content.annotations || []) {
+        const citation = annotation.url_citation || annotation
+        if (citation.url) sources.push({ title: citation.title || citation.url, url: citation.url })
+      }
+    }
+  }
+  return [...new Map(sources.map(source => [source.url, source])).values()]
+}
+
+async function structuredResponse({ name, schema, instructions, input, maxOutputTokens = 5000, webSearchDomains = [] }) {
+  requireAiEnabled()
+  const request = {
+    model: process.env.OPENAI_MODEL || 'gpt-5.6-luna',
+    instructions,
+    input,
+    max_output_tokens: maxOutputTokens,
+    text: {
+      format: {
+        type: 'json_schema',
+        name,
+        strict: true,
+        schema
+      }
+    }
+  }
+  if (webSearchDomains.length && process.env.AI_WEB_SEARCH_ENABLED === 'true') {
+    request.tools = [{ type: 'web_search', filters: { allowed_domains: webSearchDomains } }]
+    request.tool_choice = 'required'
+    request.include = ['web_search_call.action.sources']
+  }
   const response = await fetch(OPENAI_URL, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey()}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({
-      model: process.env.OPENAI_MODEL || 'gpt-5.6-sol',
-      instructions,
-      input,
-      max_output_tokens: maxOutputTokens,
-      text: {
-        format: {
-          type: 'json_schema',
-          name,
-          strict: true,
-          schema
-        }
-      }
-    })
+    body: JSON.stringify(request)
   })
   const body = await response.json()
   if (!response.ok) throw new Error(body.error?.message || `OpenAI API error ${response.status}`)
   const text = responseText(body)
   if (!text) throw new Error('OpenAI returned no structured output')
-  return { data: JSON.parse(text), responseId: body.id, model: body.model }
+  return { data: JSON.parse(text), responseId: body.id, model: body.model, sources: responseSources(body) }
 }
 
 async function embedTexts(input) {
   if (!input.length) return []
+  requireAiEnabled()
   const response = await fetch(EMBEDDINGS_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey()}`, 'Content-Type': 'application/json' },

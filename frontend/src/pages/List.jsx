@@ -28,6 +28,7 @@ export default function List() {
   const [file, setFile] = useState(null)
   const [pasteText, setPasteText] = useState('')
   const [uploading, setUploading] = useState(false)
+  const [sourceAlerts, setSourceAlerts] = useState(0)
   const fileRef = useRef()
 
   const load = async () => {
@@ -48,6 +49,10 @@ export default function List() {
   useEffect(() => {
     apiFetch('/api/clients').then(r => r.json()).then(setClients).catch(() => {})
   }, [])
+  useEffect(() => {
+    if (!['manager', 'admin'].includes(user?.role)) return
+    apiFetch('/api/admin/source-health').then(response => response.ok ? response.json() : null).then(data => data && setSourceAlerts(data.notificationCount || 0)).catch(() => {})
+  }, [user?.role])
 
   const grouped = proposals.reduce((acc, p) => {
     const loc = p.location || 'No Location'
@@ -141,6 +146,11 @@ export default function List() {
           style={{ padding: '9px 16px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer', background: 'rgba(255,255,255,0.07)', color: '#cbd5e1', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>
           📚 Standards
         </button>
+
+        {['manager', 'admin'].includes(user?.role) && <button onClick={() => nav('/admin/sources')}
+          style={{ padding: '9px 13px', borderRadius: 8, border: `1px solid ${sourceAlerts ? 'rgba(251,191,36,.5)' : 'rgba(255,255,255,0.1)'}`, cursor: 'pointer', background: sourceAlerts ? 'rgba(245,158,11,.12)' : 'rgba(255,255,255,0.07)', color: sourceAlerts ? '#fbbf24' : '#cbd5e1', fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap' }}>
+          ⚠ Sources{sourceAlerts ? ` (${sourceAlerts})` : ''}
+        </button>}
 
         <button onClick={() => nav('/dashboard')}
           style={{ padding: '9px 16px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer', background: 'rgba(255,255,255,0.07)', color: '#cbd5e1', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: 6 }}

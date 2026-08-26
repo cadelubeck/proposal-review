@@ -8,6 +8,7 @@ import MyWork from './pages/MyWork'
 import Profile from './pages/Profile'
 import Standards from './pages/Standards'
 import Compliance from './pages/Compliance'
+import SourceAdmin from './pages/SourceAdmin'
 
 function RequireAuth({ children }) {
   const { user, loading } = useAuth()
@@ -38,6 +39,7 @@ export default function App() {
           <Route path="/profile" element={<RequireAuth><Profile /></RequireAuth>} />
           <Route path="/standards" element={<RequireAuth><Standards /></RequireAuth>} />
           <Route path="/proposal/:id/compliance" element={<RequireAuth><Compliance /></RequireAuth>} />
+          <Route path="/admin/sources" element={<RequireAuth><SourceAdmin /></RequireAuth>} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>

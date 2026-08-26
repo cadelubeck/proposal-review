@@ -4,12 +4,14 @@
   "main": "server.js",
   "scripts": {
     "start": "node --env-file=.env server.js",
-    "test": "node compliance.test.js"
+    "test": "node compliance.test.js && node source-context.test.js && node source-health.test.js && node openai.test.js",
+    "migrate:supabase": "node --env-file=.env migrate-local-to-supabase.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "express": "^4.18.2",
+    "express-async-errors": "^3.1.1",
     "jsonwebtoken": "^9.0.3",
     "multer": "^1.4.5-lts.1",
     "pdf-parse": "^1.1.1"

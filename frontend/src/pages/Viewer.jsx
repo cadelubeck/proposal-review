@@ -52,12 +52,19 @@ export default function Viewer() {
   const [diagramModal, setDiagramModal] = useState(false)
   const [diagramLoading, setDiagramLoading] = useState(false)
   const [diagramError, setDiagramError] = useState(null)
+  const [analysisSources, setAnalysisSources] = useState(null)
+  const [runtime, setRuntime] = useState(null)
 
   const load = async () => {
     const r = await apiFetch(`/api/proposals/${id}`)
     if (!r.ok) return nav('/')
     const data = await r.json()
     setProposal(data)
+    apiFetch(`/api/proposals/${id}/analysis-sources`)
+      .then(response => response.ok ? response.json() : null)
+      .then(status => status && setAnalysisSources(status))
+      .catch(() => {})
+    apiFetch('/api/health').then(response => response.ok ? response.json() : null).then(config => config && setRuntime(config)).catch(() => {})
     if (data.sections?.length) setSelectedId(data.sections[0].id)
     if (data.file_path) setViewMode('pdf')
   }
@@ -124,6 +131,7 @@ export default function Viewer() {
   }
 
   const runAiReview = async (sec) => {
+    if (runtime?.aiEnabled === false) return setAiError('AI is disabled to prevent usage charges. An administrator must approve a budget before enabling it.')
     setAiLoading(sec.id)
     setAiError(null)
     try {
@@ -159,6 +167,7 @@ export default function Viewer() {
   }
 
   const runDiagramAnalysis = async () => {
+    if (runtime?.aiEnabled === false) return setDiagramError('AI is disabled to prevent usage charges. An administrator must approve a budget before enabling it.')
     setDiagramLoading(true)
     setDiagramError(null)
     try {
@@ -166,6 +175,7 @@ export default function Viewer() {
       const result = await r.json()
       if (!r.ok) throw new Error(result.error || 'Analysis failed')
       setProposal(p => ({ ...p, diagramAnalysis: result }))
+      if (result.sourceStatus) setAnalysisSources(result.sourceStatus)
     } catch (e) { setDiagramError(e.message) }
     finally { setDiagramLoading(false) }
   }
@@ -594,15 +604,15 @@ export default function Viewer() {
                       <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#6366f1', boxShadow: '0 0 0 2px #c7d2fe' }} />
                       <span style={{ fontSize: 10, fontWeight: 800, color: '#4338ca', textTransform: 'uppercase', letterSpacing: 1 }}>AI Review</span>
                     </div>
-                    <button onClick={() => runAiReview(selSec)} disabled={aiLoading === selSec.id}
+                    <button onClick={() => runAiReview(selSec)} disabled={aiLoading === selSec.id || runtime?.aiEnabled === false}
                       style={{
-                        padding: '5px 12px', borderRadius: 7, border: 'none', cursor: aiLoading === selSec.id ? 'default' : 'pointer',
-                        background: aiLoading === selSec.id ? '#e0e7ff' : 'linear-gradient(135deg, #4f46e5, #6366f1)',
-                        color: aiLoading === selSec.id ? '#818cf8' : 'white',
+                        padding: '5px 12px', borderRadius: 7, border: 'none', cursor: aiLoading === selSec.id || runtime?.aiEnabled === false ? 'default' : 'pointer',
+                        background: aiLoading === selSec.id || runtime?.aiEnabled === false ? '#e0e7ff' : 'linear-gradient(135deg, #4f46e5, #6366f1)',
+                        color: aiLoading === selSec.id || runtime?.aiEnabled === false ? '#818cf8' : 'white',
                         fontSize: 11, fontWeight: 700, transition: 'all 0.15s',
                         boxShadow: aiLoading === selSec.id ? 'none' : '0 2px 8px rgba(79,70,229,0.35)'
                       }}>
-                      {aiLoading === selSec.id
+                      {runtime?.aiEnabled === false ? 'AI disabled — cost control' : aiLoading === selSec.id
                         ? <span><span className="spin">⟳</span> Analyzing…</span>
                         : selSec.aiReview ? '↻ Re-run' : '✦ Run AI Review'}
                     </button>
@@ -627,7 +637,7 @@ export default function Viewer() {
                     {aiLoading === selSec.id && (
                       <div className="fade-in" style={{ textAlign: 'center', padding: '24px 10px', color: '#6366f1' }}>
                         <div className="spin" style={{ fontSize: 28, display: 'block', marginBottom: 10 }}>⟳</div>
-                        <div className="pulse" style={{ fontSize: 12, color: '#818cf8' }}>Claude is analyzing this section…</div>
+                        <div className="pulse" style={{ fontSize: 12, color: '#818cf8' }}>OpenAI is analyzing this section…</div>
                       </div>
                     )}
 
@@ -775,6 +785,8 @@ export default function Viewer() {
           onRun={runDiagramAnalysis}
           loading={diagramLoading}
           error={diagramError}
+          sourceStatus={analysisSources}
+          aiEnabled={runtime?.aiEnabled !== false}
         />
       )}
     </div>
@@ -915,7 +927,7 @@ function VersionModal({ proposal, selectedVersion, onSelectVersion, onUpload, on
   )
 }
 
-function DiagramModal({ proposal, onClose, onRun, loading, error }) {
+function DiagramModal({ proposal, onClose, onRun, loading, error, sourceStatus, aiEnabled }) {
   const analysis = proposal.diagramAnalysis
   const SCORES = {
     green:  { color: '#16a34a', bg: '#f0fdf4', border: '#bbf7d0', label: 'Compliant' },
@@ -940,13 +952,15 @@ function DiagramModal({ proposal, onClose, onRun, loading, error }) {
             <div style={{ fontSize: 52, marginBottom: 16 }}>🏗️</div>
             <p style={{ color: '#374151', fontWeight: 600, fontSize: 15, marginBottom: 8 }}>Analyze All Diagrams &amp; Blueprints</p>
             <p style={{ color: '#64748b', fontSize: 13, lineHeight: 1.7, maxWidth: 380, margin: '0 auto 24px' }}>
-              Claude will read the full PDF and analyze every site plan, floor plan, elevation, blueprint, and technical drawing against municipal code requirements.
+              OpenAI will read the full PDF, compare it with matched extracted library sources, and research authoritative earthquake, groundwater, geology, elevation, floodplain, and Jones Civil sources for this location.
             </p>
+            <SourceCoverage status={sourceStatus} />
             {error && <div style={{ color: '#dc2626', background: '#fef2f2', padding: '10px 14px', borderRadius: 8, marginBottom: 20, fontSize: 13, border: '1px solid #fecaca' }}>{error}</div>}
-            <button onClick={onRun} style={{
+            {!aiEnabled && <div style={{ color: '#92400e', background: '#fffbeb', padding: '10px 14px', borderRadius: 8, marginBottom: 20, fontSize: 13, border: '1px solid #fde68a' }}>AI is disabled to prevent usage charges. Source coverage and link monitoring remain active.</div>}
+            <button onClick={onRun} disabled={!aiEnabled} style={{
               padding: '12px 28px', borderRadius: 10, border: 'none',
-              background: 'linear-gradient(135deg, #4f46e5, #6366f1)', color: 'white',
-              fontWeight: 700, fontSize: 14, cursor: 'pointer', boxShadow: '0 6px 20px rgba(79,70,229,0.4)',
+              background: aiEnabled ? 'linear-gradient(135deg, #4f46e5, #6366f1)' : '#94a3b8', color: 'white',
+              fontWeight: 700, fontSize: 14, cursor: aiEnabled ? 'pointer' : 'not-allowed', boxShadow: aiEnabled ? '0 6px 20px rgba(79,70,229,0.4)' : 'none',
               transition: 'all 0.15s'
             }}>✦ Analyze All Diagrams</button>
           </div>
@@ -962,6 +976,7 @@ function DiagramModal({ proposal, onClose, onRun, loading, error }) {
 
         {analysis && !loading && (
           <div className="fade-in">
+            <SourceCoverage status={analysis.sourceStatus || sourceStatus} />
             {/* Overall compliance */}
             <div style={{
               display: 'flex', alignItems: 'flex-start', gap: 14, padding: '14px 16px',
@@ -987,6 +1002,18 @@ function DiagramModal({ proposal, onClose, onRun, loading, error }) {
                 {analysis.criticalIssues.map((issue, i) => (
                   <div key={i} style={{ padding: '9px 13px', background: '#fef2f2', borderRadius: 8, border: '1px solid #fecaca', fontSize: 13, color: '#dc2626', marginBottom: 6, lineHeight: 1.5 }}>
                     ⚠ {issue}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {analysis.researchFindings?.length > 0 && (
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 10, fontWeight: 800, color: '#4338ca', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Location research</div>
+                {analysis.researchFindings.map((finding, i) => (
+                  <div key={`${finding.sourceUrl}-${i}`} style={{ padding: '10px 13px', background: '#eef2ff', borderRadius: 8, border: '1px solid #c7d2fe', fontSize: 12, color: '#3730a3', marginBottom: 6, lineHeight: 1.5 }}>
+                    <b>{finding.category.replace('_', ' ')}</b> · {finding.finding}{' '}
+                    <a href={finding.sourceUrl} target="_blank" rel="noreferrer" style={{ color: '#4f46e5', fontWeight: 700 }}>{finding.sourceTitle}</a>
                   </div>
                 ))}
               </div>
@@ -1043,11 +1070,11 @@ function DiagramModal({ proposal, onClose, onRun, loading, error }) {
 
             <div style={{ paddingTop: 16, borderTop: '1px solid #f1f5f9', display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
               {error && <span style={{ fontSize: 12, color: '#dc2626', marginRight: 'auto', alignSelf: 'center' }}>{error}</span>}
-              <button onClick={onRun}
+              <button onClick={onRun} disabled={!aiEnabled}
                 style={{ padding: '8px 18px', borderRadius: 8, border: '1px solid #e0e7ff', background: 'white', color: '#4f46e5', fontWeight: 700, fontSize: 12, cursor: 'pointer', transition: 'all 0.12s' }}
                 onMouseEnter={e => e.currentTarget.style.background = '#eef2ff'}
                 onMouseLeave={e => e.currentTarget.style.background = 'white'}>
-                ↻ Re-analyze
+                {aiEnabled ? '↻ Re-analyze proposal' : 'AI disabled — cost control'}
               </button>
             </div>
           </div>
@@ -1055,4 +1082,18 @@ function DiagramModal({ proposal, onClose, onRun, loading, error }) {
       </div>
     </div>
   )
+}
+
+function SourceCoverage({ status }) {
+  if (!status) return null
+  return <div style={{ textAlign: 'left', padding: '12px 14px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, margin: '0 0 18px' }}>
+    <div style={{ fontSize: 10, fontWeight: 800, color: '#475569', textTransform: 'uppercase', letterSpacing: .8 }}>Connected sources</div>
+    <div style={{ fontSize: 12, color: '#64748b', marginTop: 5 }}>{status.matchedDocumentCount} matched library documents · {status.matchedRequirementCount} extracted requirements</div>
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 9 }}>
+      {status.coverage?.map(area => <span key={area.key} style={{ padding: '4px 7px', borderRadius: 20, fontSize: 10.5, fontWeight: 700, color: area.status === 'available' ? '#15803d' : '#c2410c', background: area.status === 'available' ? '#dcfce7' : '#ffedd5' }}>
+        {area.status === 'available' ? '✓' : 'Missing:'} {area.label}
+      </span>)}
+    </div>
+    <div style={{ fontSize: 10.5, color: '#64748b', marginTop: 9 }}>Missing library areas are researched from the configured authoritative domains and are still flagged for engineer verification.</div>
+  </div>
 }

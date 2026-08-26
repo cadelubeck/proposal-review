@@ -1,4 +1,5 @@
 const crypto = require('crypto')
+const { isBaselineDocument } = require('./source-catalog')
 
 const STOP = new Set('a an and are as at be by for from has in is it of on or that the this to was with'.split(' '))
 
@@ -76,8 +77,8 @@ function evaluate(proposal, controlling) {
 function buildMatrix(proposalRequirements, documents) {
   return proposalRequirements.map(submitted => {
     const candidates = retrieve(submitted, documents)
-    const baselines = candidates.filter(x => ['city_standard', 'client_standard', 'manual'].includes(x.document.documentType))
-    const sites = candidates.filter(x => ['geotechnical', 'seismic', 'groundwater', 'floodplain', 'engineering_report'].includes(x.document.documentType))
+    const baselines = candidates.filter(x => isBaselineDocument(x.document))
+    const sites = candidates.filter(x => !isBaselineDocument(x.document))
     const baseline = baselines[0]?.rule || null
     const site = sites[0]?.rule || null
     const controlling = strictnessWinner(baseline, site)
