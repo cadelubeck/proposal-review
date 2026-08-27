@@ -71,7 +71,7 @@ function responseSources(payload) {
   return [...new Map(sources.map(source => [source.url, source])).values()]
 }
 
-async function structuredResponse({ name, schema, instructions, input, maxOutputTokens = 5000, webSearchDomains = [] }) {
+function responseRequest({ name, schema, instructions, input, maxOutputTokens = 5000, webSearchDomains = [] }) {
   requireAiEnabled()
   const request = {
     model: process.env.OPENAI_MODEL || 'gpt-5.6-luna',
@@ -92,6 +92,17 @@ async function structuredResponse({ name, schema, instructions, input, maxOutput
     request.tool_choice = 'required'
     request.include = ['web_search_call.action.sources']
   }
+  return request
+}
+
+function completedResponse(body) {
+  const text = responseText(body)
+  if (!text) throw new Error('OpenAI returned no structured output')
+  return { data: JSON.parse(text), responseId: body.id, model: body.model, sources: responseSources(body), status: body.status || 'completed' }
+}
+
+async function structuredResponse(options) {
+  const request = responseRequest(options)
   const response = await fetch(OPENAI_URL, {
     method: 'POST',
     headers: {
@@ -102,9 +113,40 @@ async function structuredResponse({ name, schema, instructions, input, maxOutput
   })
   const body = await response.json()
   if (!response.ok) throw new Error(body.error?.message || `OpenAI API error ${response.status}`)
-  const text = responseText(body)
-  if (!text) throw new Error('OpenAI returned no structured output')
-  return { data: JSON.parse(text), responseId: body.id, model: body.model, sources: responseSources(body) }
+  return completedResponse(body)
+}
+
+async function startBackgroundStructuredResponse(options) {
+  const request = { ...responseRequest(options), background: true }
+  const response = await fetch(OPENAI_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey()}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(request),
+    signal: AbortSignal.timeout(45000)
+  })
+  const body = await response.json()
+  if (!response.ok) throw new Error(body.error?.message || `OpenAI API error ${response.status}`)
+  if (!body.id) throw new Error('OpenAI did not return a background response ID')
+  return { responseId: body.id, model: body.model, status: body.status || 'queued' }
+}
+
+async function retrieveBackgroundStructuredResponse(responseId) {
+  if (!/^resp_[a-zA-Z0-9_-]+$/.test(responseId || '')) throw new Error('Invalid OpenAI background response ID')
+  requireAiEnabled()
+  const response = await fetch(`${OPENAI_URL}/${encodeURIComponent(responseId)}`, {
+    headers: { Authorization: `Bearer ${apiKey()}` },
+    signal: AbortSignal.timeout(15000)
+  })
+  const body = await response.json()
+  if (!response.ok) throw new Error(body.error?.message || `OpenAI API error ${response.status}`)
+  if (['queued', 'in_progress'].includes(body.status)) return { responseId: body.id, model: body.model, status: body.status }
+  if (body.status !== 'completed') {
+    throw new Error(body.error?.message || body.incomplete_details?.reason || `OpenAI background response ended with status ${body.status || 'unknown'}`)
+  }
+  return completedResponse(body)
 }
 
 async function embedTexts(input) {
@@ -120,4 +162,4 @@ async function embedTexts(input) {
   return body.data.sort((a, b) => a.index - b.index).map(x => x.embedding)
 }
 
-module.exports = { aiConfiguration, checkConnection, structuredResponse, embedTexts }
+module.exports = { aiConfiguration, checkConnection, retrieveBackgroundStructuredResponse, startBackgroundStructuredResponse, structuredResponse, embedTexts }

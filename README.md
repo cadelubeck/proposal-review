@@ -74,6 +74,8 @@ web-search usage are billable. Hosting being on a free tier does not make AI cal
 - Restricted utility/infrastructure sources are forced to organization-only visibility, are hidden from non-admin users, and are excluded from AI requests and web-search domain expansion.
 - The catalog uses 17 source categories covering engineering standards, codes, hazards, subsurface, GIS/survey, utilities, transportation, environmental requirements, capital plans, permitting, procurement, contracts, cost/schedule, vendor qualifications, project documents, lessons learned, and definitions/data dictionaries.
 - Administrators can open **Source health** to see missing URLs, broken links, redirects/content changes, and unchecked sources. Checks run at startup and on `SOURCE_HEALTH_CHECK_INTERVAL_MS`; administrators can also check one source or all sources immediately and acknowledge notifications.
+- Proposal analysis requires a specific city and state. Sources are filtered before AI use: applicable statewide records are considered first, then exact-city records. Other cities, counties, districts, and unrelated publisher indexes are excluded and counted in the UI.
+- Catalog-assisted structured comparisons run as OpenAI background responses and the browser polls for completion, avoiding Vercel's 60-second request timeout while preserving visible queued/in-progress/failed states.
 
 ## Data and deployment
 

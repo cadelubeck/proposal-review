@@ -7,7 +7,7 @@ const crypto = require('crypto')
 const cors = require('cors')
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
-const { aiConfiguration, checkConnection, structuredResponse, embedTexts } = require('./openai')
+const { aiConfiguration, checkConnection, retrieveBackgroundStructuredResponse, startBackgroundStructuredResponse, structuredResponse, embedTexts } = require('./openai')
 const { buildMatrix } = require('./compliance')
 const { RESEARCH_DOMAINS, buildSourceStatus, matchingDocuments, researchDocuments } = require('./source-context')
 const { SOURCE_CATEGORIES, SOURCE_CATEGORY_KEYS, categoryDefinition, documentCategory } = require('./source-catalog')
@@ -142,6 +142,20 @@ const requirementSchema = {
   }
 }
 
+const catalogComparisonSchema = {
+  type: 'object', additionalProperties: false,
+  required: ['jurisdiction', 'projectScope', 'matrix', 'missingSources'],
+  properties: {
+    jurisdiction: requirementSchema.properties.jurisdiction,
+    projectScope: requirementSchema.properties.projectScope,
+    matrix: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['subject', 'requirement', 'cityStandard', 'siteRequirement', 'proposalValue', 'controllingValue', 'result', 'reason', 'recommendedCorrection', 'source'], properties: {
+      subject: { type: 'string' }, requirement: { type: 'string' }, cityStandard: { type: ['string', 'null'] }, siteRequirement: { type: ['string', 'null'] }, proposalValue: { type: ['string', 'null'] }, controllingValue: { type: ['string', 'null'] }, result: { type: 'string', enum: ['pass', 'fail', 'review'] }, reason: { type: 'string' }, recommendedCorrection: { type: 'string' },
+      source: { type: ['object', 'null'], additionalProperties: false, required: ['title', 'url', 'page', 'excerpt', 'authorityLevel', 'documentStatus'], properties: { title: { type: 'string' }, url: { type: 'string' }, page: { type: ['integer', 'null'] }, excerpt: { type: 'string' }, authorityLevel: { type: 'string' }, documentStatus: { type: 'string' } } }
+    }}},
+    missingSources: { type: 'array', items: { type: 'string' } }
+  }
+}
+
 const SOURCE_TAXONOMY_TEXT = SOURCE_CATEGORIES
   .map(category => `${category.label}: ${category.description}`)
   .join('\n')
@@ -153,6 +167,48 @@ function researchDomainsForDocuments(documents) {
     try { domains.push(new URL(doc.sourceUrl).hostname) } catch {}
   }
   return [...new Set(domains)].slice(0, 100)
+}
+
+function sourceForCatalogPrompt(doc) {
+  return {
+    title: doc.title,
+    category: documentCategory(doc),
+    url: doc.sourceUrl,
+    jurisdiction: doc.jurisdiction,
+    jurisdictionTier: doc.jurisdictionTier,
+    authorityLevel: doc.authorityLevel,
+    documentStatus: doc.documentStatus,
+    notes: doc.notes
+  }
+}
+
+function catalogComparisonRequest(proposal, catalogDocs, sourceStatus) {
+  const stateSources = catalogDocs.filter(doc => doc.jurisdictionTier === 'state').map(sourceForCatalogPrompt)
+  const citySources = catalogDocs.filter(doc => doc.jurisdictionTier === 'city').map(sourceForCatalogPrompt)
+  return {
+    name: 'catalog_standards_comparison',
+    schema: catalogComparisonSchema,
+    instructions: `Assist a licensed civil engineer and public-procurement reviewer. Work in strict jurisdiction order: first identify applicable ${sourceStatus.jurisdiction.state} requirements, then apply only ${sourceStatus.jurisdiction.city} requirements. Do not research, cite, or apply another city, county, district, or private entity. Compare the submitted proposal only against the supplied jurisdiction-filtered sources and their directly linked official materials. Use this precedence: (1) addenda and written clarifications; (2) executed contract, special provisions, plans, and specifications; (3) solicitation and evaluation criteria; (4) the expressly incorporated municipal standards edition; (5) applicable law, permits, and funding rules; (6) adopted municipal code/plans/policies; (7) maps, portals, planning studies, and historical data. Never substitute the newest edition for the incorporated edition. Score only solicitation criteria. A pass or fail requires a proposal passage and a verified controlling requirement; otherwise return review. Treat hazards, GIS, groundwater, soils, environmental, and historical sources as screening unless confirmed by the responsible professional or agency. Never use protected-class data, political activity, personal information, restricted archaeology, or sensitive utility/security details. Every source URL must be one you actually inspected with web search.`,
+    input: `PROPOSAL: ${proposal.name}\nCLIENT: ${proposal.company || ''}\nSTATE: ${sourceStatus.jurisdiction.state}\nCITY: ${sourceStatus.jurisdiction.city}\n\nPROPOSAL TEXT:\n${(proposal.text_content || '').slice(0, 150000)}\n\nSTATE SOURCES (review first):\n${JSON.stringify(stateSources)}\n\n${sourceStatus.jurisdiction.city.toUpperCase()} SOURCES (review second):\n${JSON.stringify(citySources)}`,
+    maxOutputTokens: 10000,
+    webSearchDomains: researchDomainsForDocuments(catalogDocs)
+  }
+}
+
+function completedCatalogReview(researched, sourceStatus) {
+  const verifiedUrls = new Set(researched.sources.map(source => source.url))
+  const matrix = researched.data.matrix.map((row, index) => {
+    const sourceVerified = !row.source || verifiedUrls.has(row.source.url)
+    return {
+      id: `catalog-${index + 1}`,
+      ...row,
+      result: sourceVerified ? row.result : 'review',
+      reason: sourceVerified ? row.reason : `${row.reason} Citation could not be verified in the API response; engineer review required.`,
+      source: sourceVerified ? row.source : null
+    }
+  })
+  const summary = { pass: matrix.filter(row => row.result === 'pass').length, fail: matrix.filter(row => row.result === 'fail').length, review: matrix.filter(row => row.result === 'review').length }
+  return { ...researched.data, matrix, summary, sourceStatus, matchedDocumentIds: [], webSources: researched.sources, generatedAt: new Date().toISOString(), openai: { responseId: researched.responseId, model: researched.model }, decisionPolicy: `Jurisdiction-filtered catalog screening: ${sourceStatus.jurisdiction.state} first, then ${sourceStatus.jurisdiction.city}; other cities and counties excluded. Only verified, project-applicable controlling sources may support pass/fail. Final approval remains with the responsible engineer.` }
 }
 
 async function extractRequirements(text, context) {
@@ -893,6 +949,10 @@ app.post('/api/proposals/:id/compliance-review', async (req, res) => {
     if (!p) return res.status(404).json({ error: 'Proposal not found' })
     const allDocs = await readAnalysisStandards(req)
     const sourceStatus = buildSourceStatus(allDocs, p)
+    if (!sourceStatus.jurisdiction.resolved) return res.status(400).json({
+      error: 'Enter a specific city and state in the proposal location before running standards comparison. Broad multi-city research is not allowed.',
+      sourceStatus
+    })
     const docs = matchingDocuments(allDocs, p)
     const catalogDocs = researchDocuments(allDocs, p)
     if (!docs.length) {
@@ -902,43 +962,22 @@ app.post('/api/proposals/:id/compliance-review', async (req, res) => {
         error.statusCode = 503
         throw error
       }
-      const catalogSchema = {
-        type: 'object', additionalProperties: false,
-        required: ['jurisdiction', 'projectScope', 'matrix', 'missingSources'],
-        properties: {
-          jurisdiction: requirementSchema.properties.jurisdiction,
-          projectScope: requirementSchema.properties.projectScope,
-          matrix: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['subject', 'requirement', 'cityStandard', 'siteRequirement', 'proposalValue', 'controllingValue', 'result', 'reason', 'recommendedCorrection', 'source'], properties: {
-            subject: { type: 'string' }, requirement: { type: 'string' }, cityStandard: { type: ['string', 'null'] }, siteRequirement: { type: ['string', 'null'] }, proposalValue: { type: ['string', 'null'] }, controllingValue: { type: ['string', 'null'] }, result: { type: 'string', enum: ['pass', 'fail', 'review'] }, reason: { type: 'string' }, recommendedCorrection: { type: 'string' },
-            source: { type: ['object', 'null'], additionalProperties: false, required: ['title', 'url', 'page', 'excerpt', 'authorityLevel', 'documentStatus'], properties: { title: { type: 'string' }, url: { type: 'string' }, page: { type: ['integer', 'null'] }, excerpt: { type: 'string' }, authorityLevel: { type: 'string' }, documentStatus: { type: 'string' } } }
-          }}},
-          missingSources: { type: 'array', items: { type: 'string' } }
-        }
+      if (p.complianceReviewJob && ['queued', 'in_progress'].includes(p.complianceReviewJob.status)) {
+        return res.status(202).json({ status: p.complianceReviewJob.status, job: p.complianceReviewJob, sourceStatus })
       }
-      const researched = await structuredResponse({
-        name: 'catalog_standards_comparison',
-        schema: catalogSchema,
-        instructions: `Assist a licensed civil engineer and public-procurement reviewer. Research and compare the submitted proposal only against sources in the supplied Utah catalog and their directly linked official materials. Use this precedence: (1) addenda and written clarifications; (2) executed contract, special provisions, plans, and specifications; (3) solicitation and evaluation criteria; (4) the expressly incorporated municipal standards edition; (5) applicable law, permits, and funding rules; (6) adopted municipal code/plans/policies; (7) maps, portals, planning studies, and historical data. Never substitute the newest edition for the incorporated edition. Score only solicitation criteria. A pass or fail requires a proposal passage and a verified controlling requirement; otherwise return review. Treat hazards, GIS, groundwater, soils, environmental, and historical sources as screening unless confirmed by the responsible professional or agency. Never use protected-class data, political activity, personal information, restricted archaeology, or sensitive utility/security details. Every source URL must be one you actually inspected with web search.`,
-        input: `PROPOSAL: ${p.name}\nCLIENT: ${p.company || ''}\nLOCATION: ${p.location || ''}\n\nPROPOSAL TEXT:\n${(p.text_content || '').slice(0, 150000)}\n\nUTAH SOURCE CATALOG:\n${JSON.stringify(catalogDocs.slice(0, 180).map(doc => ({ title: doc.title, category: documentCategory(doc), url: doc.sourceUrl, jurisdiction: doc.jurisdiction, authorityLevel: doc.authorityLevel, documentStatus: doc.documentStatus, notes: doc.notes })))}`,
-        maxOutputTokens: 10000,
-        webSearchDomains: researchDomainsForDocuments(catalogDocs)
-      })
-      const verifiedUrls = new Set(researched.sources.map(source => source.url))
-      const matrix = researched.data.matrix.map((row, index) => {
-        const sourceVerified = !row.source || verifiedUrls.has(row.source.url)
-        return {
-          id: `catalog-${index + 1}`,
-          ...row,
-          result: sourceVerified ? row.result : 'review',
-          reason: sourceVerified ? row.reason : `${row.reason} Citation could not be verified in the API response; engineer review required.`,
-          source: sourceVerified ? row.source : null
-        }
-      })
-      const summary = { pass: matrix.filter(row => row.result === 'pass').length, fail: matrix.filter(row => row.result === 'fail').length, review: matrix.filter(row => row.result === 'review').length }
-      p.complianceReview = { ...researched.data, matrix, summary, sourceStatus, matchedDocumentIds: [], webSources: researched.sources, generatedAt: new Date().toISOString(), openai: { responseId: researched.responseId, model: researched.model }, decisionPolicy: 'Catalog-assisted screening; only verified, project-applicable controlling sources may support pass/fail. Final approval remains with the responsible engineer.' }
+      const started = await startBackgroundStructuredResponse(catalogComparisonRequest(p, catalogDocs, sourceStatus))
+      p.complianceReviewJob = {
+        responseId: started.responseId,
+        status: started.status,
+        model: started.model,
+        state: sourceStatus.jurisdiction.state,
+        city: sourceStatus.jurisdiction.city,
+        startedAt: new Date().toISOString()
+      }
       p.updated_at = new Date().toISOString()
       await writeProposal(p.id, p)
-      return res.json(p.complianceReview)
+      await writeAudit({ event: 'compliance_review_started', userId: req.user.id, proposalId: p.id, state: p.complianceReviewJob.state, city: p.complianceReviewJob.city })
+      return res.status(202).json({ status: started.status, job: p.complianceReviewJob, sourceStatus })
     }
 
     const extracted = await extractRequirements(p.text_content || '', `PROPOSAL: ${p.name}\nCLIENT: ${p.company}\nSUBMITTED LOCATION: ${p.location}\nExtract submitted design values, not governing standards.`)
@@ -962,11 +1001,49 @@ app.post('/api/proposals/:id/compliance-review', async (req, res) => {
       decisionPolicy: 'City/client baseline; site-specific source controls only when deterministically stricter; conflicts require engineer review.'
     }
     p.updated_at = new Date().toISOString()
+    delete p.complianceReviewJob
     await writeProposal(p.id, p)
     res.json(p.complianceReview)
   } catch (error) {
     console.error('Compliance review error:', error.message)
     res.status(errorStatus(error)).json({ error: error.message })
+  }
+})
+
+app.get('/api/proposals/:id/compliance-review/status', async (req, res) => {
+  const p = await readProposal(req.params.id)
+  if (!p) return res.status(404).json({ error: 'Proposal not found' })
+  if (!p.complianceReviewJob) {
+    if (p.complianceReview) return res.json(p.complianceReview)
+    return res.status(404).json({ error: 'No structured comparison is currently running.' })
+  }
+  try {
+    const allDocs = await readAnalysisStandards(req)
+    const sourceStatus = buildSourceStatus(allDocs, p)
+    if (p.complianceReviewJob.state !== sourceStatus.jurisdiction.state || p.complianceReviewJob.city !== sourceStatus.jurisdiction.city) {
+      return res.status(409).json({ error: 'The proposal location changed while the comparison was running. Start a new comparison.', sourceStatus })
+    }
+    const researched = await retrieveBackgroundStructuredResponse(p.complianceReviewJob.responseId)
+    if (['queued', 'in_progress'].includes(researched.status)) {
+      if (p.complianceReviewJob.status !== researched.status) {
+        p.complianceReviewJob.status = researched.status
+        await writeProposal(p.id, p)
+      }
+      return res.status(202).json({ status: researched.status, job: p.complianceReviewJob, sourceStatus })
+    }
+    p.complianceReview = completedCatalogReview(researched, sourceStatus)
+    delete p.complianceReviewJob
+    p.updated_at = new Date().toISOString()
+    await writeProposal(p.id, p)
+    await writeAudit({ event: 'compliance_review_completed', userId: req.user.id, proposalId: p.id, state: sourceStatus.jurisdiction.state, city: sourceStatus.jurisdiction.city })
+    res.json(p.complianceReview)
+  } catch (error) {
+    p.complianceReviewJob.status = 'failed'
+    p.complianceReviewJob.error = error.message
+    p.complianceReviewJob.failedAt = new Date().toISOString()
+    await writeProposal(p.id, p)
+    await writeAudit({ event: 'compliance_review_failed', userId: req.user.id, proposalId: p.id, error: error.message })
+    res.status(502).json({ error: `Structured comparison failed: ${error.message}` })
   }
 })
 
@@ -1003,6 +1080,10 @@ app.post('/api/proposals/:id/analyze-diagrams', async (req, res) => {
     }
     const allDocs = await readAnalysisStandards(req)
     const sourceStatus = buildSourceStatus(allDocs, p)
+    if (!sourceStatus.jurisdiction.resolved) return res.status(400).json({
+      error: 'Enter a specific city and state in the proposal location before analyzing the PDF. Broad multi-city research is not allowed.',
+      sourceStatus
+    })
     const matchedDocs = matchingDocuments(allDocs, p)
     const catalogDocs = researchDocuments(allDocs, p)
     const libraryRequirements = matchedDocs.flatMap(doc => (doc.requirements || []).map(rule => ({
@@ -1032,7 +1113,7 @@ app.post('/api/proposals/:id/analyze-diagrams', async (req, res) => {
       instructions: `Assist a licensed civil engineer and public-procurement reviewer. Analyze every visible plan, detail, section, table, schedule, form, and contract provision and cite page or sheet identifiers. Compare against the supplied extracted library requirements. Research the project location and governing agencies using allowed authoritative domains. Cover this complete taxonomy:\n${SOURCE_TAXONOMY_TEXT}\nNever invent a requirement, condition, URL, or compliance conclusion. Distinguish controlling adopted requirements from informational evidence. If a needed source is unavailable, stale, or its location relevance cannot be established, mark it missing and use yellow rather than claiming compliance. Apply vendor criteria only when legally permissible. Never expose, summarize, or search for restricted utility or critical-infrastructure details. Research findings are screening evidence, not a substitute for a site-specific stamped report or legal determination.`,
       input: [{ role: 'user', content: [
         { type: 'input_file', filename: p.file_path.split('/').pop(), file_data: `data:application/pdf;base64,${fileBuffer.toString('base64')}` },
-        { type: 'input_text', text: `Review ${p.name}, ${p.company || ''}, ${p.location || ''}.\n\nSOURCE PRECEDENCE (highest first): issued addenda/clarifications; executed contract and special provisions/plans/specifications; solicitation and evaluation criteria; expressly incorporated municipal standards edition; applicable law/permits/funding; adopted municipal code/plans/policies; then maps, portals, studies, and historical data. Never substitute the newest edition for the incorporated edition.\n\nMATCHED EXTRACTED LIBRARY REQUIREMENTS:\n${JSON.stringify(libraryRequirements)}\n\nCATALOG SOURCES AVAILABLE FOR AUTHORITATIVE RESEARCH (discovery/screening unless their adoption and project applicability are verified):\n${JSON.stringify(catalogDocs.slice(0, 180).map(doc => ({ title: doc.title, sourceCategory: documentCategory(doc), sourceUrl: doc.sourceUrl, jurisdiction: doc.jurisdiction, authorityLevel: doc.authorityLevel, documentStatus: doc.documentStatus, notes: doc.notes })))}` }
+        { type: 'input_text', text: `Review ${p.name}, ${p.company || ''}, ${p.location || ''}. Work in strict jurisdiction order: ${sourceStatus.jurisdiction.state} first, then ${sourceStatus.jurisdiction.city}. Do not use another city, county, district, or private entity.\n\nSOURCE PRECEDENCE (highest first): issued addenda/clarifications; executed contract and special provisions/plans/specifications; solicitation and evaluation criteria; expressly incorporated municipal standards edition; applicable law/permits/funding; adopted municipal code/plans/policies; then maps, portals, studies, and historical data. Never substitute the newest edition for the incorporated edition.\n\nMATCHED EXTRACTED LIBRARY REQUIREMENTS:\n${JSON.stringify(libraryRequirements)}\n\nJURISDICTION-FILTERED CATALOG SOURCES, STATE FIRST THEN CITY (discovery/screening unless adoption and project applicability are verified):\n${JSON.stringify(catalogDocs.map(sourceForCatalogPrompt))}` }
       ]}],
       maxOutputTokens: 10000,
       webSearchDomains: [...new Set([
@@ -1072,6 +1153,10 @@ app.post('/api/proposals/:id/ai-review', async (req, res) => {
     const allDocs = await readAnalysisStandards(req)
     const docs = matchingDocuments(allDocs, p)
     const sourceStatus = buildSourceStatus(allDocs, p)
+    if (!sourceStatus.jurisdiction.resolved) return res.status(400).json({
+      error: 'Enter a specific city and state in the proposal location before running AI review. Broad multi-city research is not allowed.',
+      sourceStatus
+    })
     if (!docs.length) return res.status(400).json({
       error: allDocs.length
         ? 'No extracted library sources match this proposal location and client.'
@@ -1094,7 +1179,7 @@ app.post('/api/proposals/:id/ai-review', async (req, res) => {
     const reviewed = await structuredResponse({
       name: 'section_review', schema,
       instructions: `Assist an engineer and public-procurement reviewer. Use only supplied sources and consider the complete source taxonomy below. If a controlling comparison is not deterministic or a relevant category is missing, score yellow. Apply vendor criteria only when legally permissible. Never fabricate a citation or URL and never expose sensitive infrastructure data.\n${SOURCE_TAXONOMY_TEXT}`,
-      input: `PROPOSAL: ${p.name}\nLOCATION: ${p.location}\nSECTION: ${sec.title}\n${contextText}\n\nRETRIEVED LIBRARY REQUIREMENTS:\n${JSON.stringify(sources)}`,
+      input: `PROPOSAL: ${p.name}\nSTATE: ${sourceStatus.jurisdiction.state}\nCITY: ${sourceStatus.jurisdiction.city}\nSECTION: ${sec.title}\n${contextText}\n\nRETRIEVED LIBRARY REQUIREMENTS (STATE FIRST, THEN THIS CITY ONLY):\n${JSON.stringify(sources)}`,
       maxOutputTokens: 2500
     })
     res.json({ ...reviewed.data, sourceStatus, generatedAt: new Date().toISOString(), openai: { responseId: reviewed.responseId, model: reviewed.model } })

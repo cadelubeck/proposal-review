@@ -7,22 +7,69 @@ export default function Compliance() {
   const [proposal, setProposal] = useState(null); const [loading, setLoading] = useState(false); const [error, setError] = useState('')
   const [sourceStatus, setSourceStatus] = useState(null)
   const [runtime, setRuntime] = useState(null)
+  const [progress, setProgress] = useState('')
+  const readJson = async response => {
+    try { return await response.json() } catch { return { error: `The server returned an unreadable response (${response.status}).` } }
+  }
+  const pollComparison = async () => {
+    for (let attempt = 0; attempt < 120; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5000))
+      const response = await apiFetch(`/api/proposals/${id}/compliance-review/status`)
+      const data = await readJson(response)
+      if (data.sourceStatus) setSourceStatus(data.sourceStatus)
+      if (response.status === 202) {
+        setProgress(data.status === 'queued' ? 'Comparison queued…' : 'Reviewing state sources, then city sources…')
+        setProposal(current => current ? { ...current, complianceReviewJob: data.job } : current)
+        continue
+      }
+      if (!response.ok) throw new Error(data.error || 'Structured comparison failed.')
+      setProposal(current => ({ ...current, complianceReview: data, complianceReviewJob: null }))
+      setProgress('')
+      return
+    }
+    throw new Error('The comparison is still running. Reload this page later to resume checking its status.')
+  }
   const load = async () => {
     const [proposalResponse, sourcesResponse, healthResponse] = await Promise.all([
       apiFetch(`/api/proposals/${id}`),
       apiFetch(`/api/proposals/${id}/analysis-sources`),
       apiFetch('/api/health')
     ])
-    if (proposalResponse.ok) setProposal(await proposalResponse.json())
+    if (proposalResponse.ok) {
+      const data = await proposalResponse.json()
+      setProposal(data)
+      if (['queued', 'in_progress'].includes(data.complianceReviewJob?.status)) {
+        setLoading(true)
+        setProgress(data.complianceReviewJob.status === 'queued' ? 'Comparison queued…' : 'Reviewing state sources, then city sources…')
+        pollComparison().catch(failure => setError(failure.message)).finally(() => setLoading(false))
+      } else if (data.complianceReviewJob?.status === 'failed') {
+        setError(data.complianceReviewJob.error || 'The previous comparison failed. You can run it again.')
+      }
+    }
     if (sourcesResponse.ok) setSourceStatus(await sourcesResponse.json())
     if (healthResponse.ok) setRuntime(await healthResponse.json())
   }
   useEffect(() => { load() }, [id])
   const run = async () => {
-    setLoading(true); setError('')
-    const r = await apiFetch(`/api/proposals/${id}/compliance-review`, { method: 'POST' }); const data = await r.json(); setLoading(false)
-    if (data.sourceStatus) setSourceStatus(data.sourceStatus)
-    if (!r.ok) return setError(data.error); setProposal(p => ({ ...p, complianceReview: data }))
+    setLoading(true); setError(''); setProgress('Starting jurisdiction-filtered comparison…')
+    try {
+      const response = await apiFetch(`/api/proposals/${id}/compliance-review`, { method: 'POST' })
+      const data = await readJson(response)
+      if (data.sourceStatus) setSourceStatus(data.sourceStatus)
+      if (response.status === 202) {
+        setProposal(current => ({ ...current, complianceReviewJob: data.job }))
+        setProgress(data.status === 'queued' ? 'Comparison queued…' : 'Reviewing state sources, then city sources…')
+        await pollComparison()
+      } else {
+        if (!response.ok) throw new Error(data.error || 'Structured comparison failed.')
+        setProposal(current => ({ ...current, complianceReview: data, complianceReviewJob: null }))
+      }
+    } catch (failure) {
+      setError(failure.message)
+    } finally {
+      setLoading(false)
+      setProgress('')
+    }
   }
   if (!proposal) return null
   const review = proposal.complianceReview
@@ -31,13 +78,13 @@ export default function Compliance() {
       <button onClick={() => nav(`/proposal/${id}`)} style={button}>← Proposal</button>
       <div style={{ flex: 1 }}><div style={{ fontWeight: 800 }}>Controlling Standards Review</div><div style={{ fontSize: 10, color: '#a5b4fc' }}>{proposal.name} · {proposal.location}</div></div>
       <button onClick={() => nav('/standards')} style={button}>Document library</button>
-      <button onClick={run} disabled={loading || runtime?.aiEnabled === false} title={runtime?.aiEnabled === false ? 'AI is disabled to prevent usage charges.' : ''} style={{ ...button, background: runtime?.aiEnabled === false ? '#475569' : '#4f46e5', color: 'white', cursor: runtime?.aiEnabled === false ? 'not-allowed' : 'pointer' }}>{runtime?.aiEnabled === false ? 'AI disabled — cost control' : loading ? 'Comparing proposal to sources…' : review ? 'Re-run structured comparison' : 'Run structured standards comparison'}</button>
+      <button onClick={run} disabled={loading || runtime?.aiEnabled === false} title={runtime?.aiEnabled === false ? 'AI is disabled to prevent usage charges.' : ''} style={{ ...button, background: runtime?.aiEnabled === false ? '#475569' : '#4f46e5', color: 'white', cursor: runtime?.aiEnabled === false ? 'not-allowed' : 'pointer' }}>{runtime?.aiEnabled === false ? 'AI disabled — cost control' : loading ? (progress || 'Comparing proposal to sources…') : review ? 'Re-run structured comparison' : 'Run structured standards comparison'}</button>
     </header>
     <main style={{ maxWidth: 1400, margin: '0 auto', padding: 26 }}>
       {error && <div style={{ padding: 14, background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', borderRadius: 10, marginBottom: 16 }}>{error}</div>}
       {runtime?.aiEnabled === false && <div style={{ padding: 14, background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', borderRadius: 10, marginBottom: 16 }}>AI comparisons are intentionally disabled so this environment cannot generate API charges. The source catalog and link-health monitoring remain available.</div>}
       {sourceStatus && <SourceStatus status={sourceStatus} onOpenLibrary={() => nav('/standards')} />}
-      {!review && <div style={{ ...card, marginTop: 16 }}><h2>Structured comparison</h2><p style={{ color: '#64748b' }}>This control extracts design values from the proposal, retrieves requirements from the matched document library shown above, and applies the stricter-of-sources rules engine. It does not silently treat a missing source as compliance.</p></div>}
+      {!review && <div style={{ ...card, marginTop: 16 }}><h2>Structured comparison</h2><p style={{ color: '#64748b' }}>This control resolves the proposal state and city, reviews applicable state sources first, then reviews only that city’s sources. Other cities, counties, districts, and unrelated publishers are excluded before AI analysis.</p>{loading && <div style={{ marginTop: 12, color: '#4f46e5', fontWeight: 750 }}>⟳ {progress}</div>}</div>}
       {review && <>
         <div style={{ display: 'grid', gridTemplateColumns: '2fr repeat(3,1fr)', gap: 12, marginBottom: 16 }}>
           <div style={card}><div style={label}>Detected scope</div><div style={{ fontWeight: 700, marginTop: 8 }}>{review.projectScope.join(', ') || 'Not identified'}</div><div style={{ fontSize: 12, color: '#64748b', marginTop: 7 }}>{review.jurisdiction.city || ''} {review.jurisdiction.state || ''} · confidence {Math.round(review.jurisdiction.confidence * 100)}%</div></div>
@@ -66,8 +113,9 @@ function SourceStatus({ status, onOpenLibrary }) {
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start' }}>
       <div>
         <div style={label}>Sources connected to this proposal</div>
-        <div style={{ fontSize: 22, fontWeight: 850, marginTop: 7 }}>{status.matchedDocumentCount} extracted documents · {status.matchedRequirementCount} requirements</div>
-        <div style={{ color: '#64748b', fontSize: 12, marginTop: 5 }}>{status.researchSourceCount || 0} relevant research links · {status.repositoryDocumentCount} total repository records</div>
+        <div style={{ fontSize: 22, fontWeight: 850, marginTop: 7 }}>{status.jurisdiction?.resolved ? `${status.jurisdiction.state} → ${status.jurisdiction.city}` : 'City and state required'}</div>
+        <div style={{ color: '#64748b', fontSize: 12, marginTop: 5 }}>{status.stateDocumentCount || 0} state records · {status.cityDocumentCount || 0} city records · {status.excludedJurisdictionDocumentCount || 0} unrelated records excluded</div>
+        <div style={{ color: '#64748b', fontSize: 12, marginTop: 3 }}>{status.matchedDocumentCount} extracted documents · {status.matchedRequirementCount} requirements · {status.researchSourceCount || 0} jurisdiction-filtered research links</div>
       </div>
       <button onClick={onOpenLibrary} style={{ ...button, background: '#eef2ff', color: '#4338ca' }}>Manage sources</button>
     </div>

@@ -41,6 +41,12 @@ function normalized(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\but\b/g, 'utah').trim()
 }
 
+function stateFrom(value) {
+  const text = normalized(value)
+  if (/\butah\b/.test(text)) return 'Utah'
+  return null
+}
+
 function locationMatches(proposalLocation, sourceJurisdiction) {
   if (!sourceJurisdiction) return true
   const proposal = normalized(proposalLocation)
@@ -68,20 +74,75 @@ function matchesProposal(doc, proposal) {
   return locationMatches(proposal.location, doc.jurisdiction) && clientMatches(proposal.company, doc.client)
 }
 
-function researchMatchesProposal(doc, proposal) {
-  if (!doc.sourceUrl || (doc.sensitivity || 'public') === 'restricted') return false
-  if (['statewide', 'federal'].includes(doc.catalogScope)) return true
-  const jurisdiction = normalized(doc.jurisdiction)
-  if (!jurisdiction || ['utah', 'state of utah', 'united states', 'usa', 'federal'].includes(jurisdiction)) return true
-  return locationMatches(proposal.location, doc.jurisdiction)
+function municipalJurisdictions(documents) {
+  return [...new Set(documents
+    .filter(doc => ['municipal', 'project'].includes(doc.catalogScope) || /\bcity\b/i.test(doc.jurisdiction || ''))
+    .map(doc => String(doc.jurisdiction || '').trim())
+    .filter(value => value && !/\b(county|district|company)\b/i.test(value)))]
+}
+
+function resolveProposalJurisdiction(documents, proposal) {
+  const location = String(proposal?.location || '').trim()
+  const localLocation = normalized(location).replace(/\butah\b/g, '').trim()
+  const candidates = municipalJurisdictions(documents)
+    .filter(jurisdiction => {
+      const localJurisdiction = normalized(jurisdiction).replace(/\butah\b/g, '').trim()
+      return localLocation && locationMatches(localLocation, localJurisdiction)
+    })
+    .sort((a, b) => {
+      const aHasState = stateFrom(a) ? 1 : 0
+      const bHasState = stateFrom(b) ? 1 : 0
+      return bHasState - aHasState || b.length - a.length
+    })
+  const selected = candidates[0] || null
+  const state = stateFrom(location) || stateFrom(selected)
+  const city = selected ? selected.replace(/,?\s+(Utah|UT)$/i, '').trim() : null
+  return { state, city, resolved: Boolean(state && city), submittedLocation: location }
+}
+
+function isGenericPublisherIndex(doc) {
+  if (doc.catalogScope !== 'statewide') return false
+  try {
+    const url = new URL(doc.sourceUrl)
+    return url.hostname.replace(/^www\./, '') === 'jonescivil.com' && url.pathname === '/'
+  } catch { return false }
+}
+
+function jurisdictionTier(doc, jurisdiction) {
+  if (!jurisdiction.resolved || !doc.jurisdiction) return null
+  if (isGenericPublisherIndex(doc)) return null
+  const source = normalized(doc.jurisdiction)
+  const state = normalized(jurisdiction.state)
+  if (source === state || source === `state of ${state}`) return 'state'
+  if (/\b(county|district|company)\b/i.test(doc.jurisdiction)) return null
+  if (locationMatches(`${jurisdiction.city}, ${jurisdiction.state}`, doc.jurisdiction)) return 'city'
+  return null
+}
+
+function jurisdictionDocuments(documents, proposal) {
+  const jurisdiction = resolveProposalJurisdiction(documents, proposal)
+  return documents
+    .map(doc => ({ doc, tier: jurisdictionTier(doc, jurisdiction) }))
+    .filter(item => item.tier)
+    .sort((a, b) => {
+      const tierOrder = { state: 0, city: 1 }
+      const authorityOrder = { controlling: 0, adopted: 1, incorporated: 2, guidance: 3, screening: 4, unknown: 5 }
+      return tierOrder[a.tier] - tierOrder[b.tier]
+        || (authorityOrder[a.doc.authorityLevel] ?? 5) - (authorityOrder[b.doc.authorityLevel] ?? 5)
+        || a.doc.title.localeCompare(b.doc.title)
+    })
 }
 
 function matchingDocuments(documents, proposal) {
-  return documents.filter(doc => doc.extractionStatus === 'complete' && matchesProposal(doc, proposal))
+  return jurisdictionDocuments(documents, proposal)
+    .filter(({ doc }) => doc.extractionStatus === 'complete' && clientMatches(proposal.company, doc.client))
+    .map(({ doc, tier }) => ({ ...doc, jurisdictionTier: tier }))
 }
 
 function researchDocuments(documents, proposal) {
-  return documents.filter(doc => researchMatchesProposal(doc, proposal))
+  return jurisdictionDocuments(documents, proposal)
+    .filter(({ doc }) => doc.sourceUrl && (doc.sensitivity || 'public') !== 'restricted')
+    .map(({ doc, tier }) => ({ ...doc, jurisdictionTier: tier }))
 }
 
 function sourceCoverage(extractedDocuments, catalogDocuments = extractedDocuments) {
@@ -103,12 +164,19 @@ function sourceCoverage(extractedDocuments, catalogDocuments = extractedDocument
 }
 
 function buildSourceStatus(allDocuments, proposal) {
+  const jurisdiction = resolveProposalJurisdiction(allDocuments, proposal)
+  const selected = jurisdictionDocuments(allDocuments, proposal)
   const complete = allDocuments.filter(doc => doc.extractionStatus === 'complete')
   const matched = matchingDocuments(allDocuments, proposal)
   const research = researchDocuments(allDocuments, proposal)
-  const pending = allDocuments.filter(doc => doc.extractionStatus !== 'complete')
+  const pending = selected.map(item => item.doc).filter(doc => doc.extractionStatus !== 'complete')
   return {
+    jurisdiction,
     repositoryDocumentCount: allDocuments.length,
+    jurisdictionDocumentCount: selected.length,
+    excludedJurisdictionDocumentCount: allDocuments.length - selected.length,
+    stateDocumentCount: selected.filter(item => item.tier === 'state').length,
+    cityDocumentCount: selected.filter(item => item.tier === 'city').length,
     extractedDocumentCount: complete.length,
     matchedDocumentCount: matched.length,
     matchedRequirementCount: matched.reduce((total, doc) => total + (doc.requirements?.length || 0), 0),
@@ -120,6 +188,7 @@ function buildSourceStatus(allDocuments, proposal) {
       documentType: doc.documentType,
       jurisdiction: doc.jurisdiction || '',
       client: doc.client || '',
+      jurisdictionTier: doc.jurisdictionTier,
       requirementCount: doc.requirements?.length || 0
     })),
     researchSources: research.slice(0, 250).map(doc => ({
@@ -130,11 +199,12 @@ function buildSourceStatus(allDocuments, proposal) {
       jurisdiction: doc.jurisdiction || '',
       authorityLevel: doc.authorityLevel || 'unknown',
       documentStatus: doc.documentStatus || 'unknown',
-      notes: doc.notes || ''
+      notes: doc.notes || '',
+      jurisdictionTier: doc.jurisdictionTier
     })),
     coverage: sourceCoverage(matched, research),
     researchDomains: RESEARCH_DOMAINS
   }
 }
 
-module.exports = { RESEARCH_DOMAINS, buildSourceStatus, clientMatches, locationMatches, matchingDocuments, matchesProposal, researchDocuments, researchMatchesProposal, sourceCoverage }
+module.exports = { RESEARCH_DOMAINS, buildSourceStatus, clientMatches, jurisdictionDocuments, jurisdictionTier, locationMatches, matchingDocuments, matchesProposal, researchDocuments, resolveProposalJurisdiction, sourceCoverage }
