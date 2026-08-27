@@ -7,15 +7,15 @@ const crypto = require('crypto')
 const cors = require('cors')
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
-const { structuredResponse, embedTexts } = require('./openai')
+const { aiConfiguration, checkConnection, structuredResponse, embedTexts } = require('./openai')
 const { buildMatrix } = require('./compliance')
-const { RESEARCH_DOMAINS, buildSourceStatus, matchingDocuments } = require('./source-context')
+const { RESEARCH_DOMAINS, buildSourceStatus, matchingDocuments, researchDocuments } = require('./source-context')
 const { SOURCE_CATEGORIES, SOURCE_CATEGORY_KEYS, categoryDefinition, documentCategory } = require('./source-catalog')
 const { checkSourceUrl, mergeHealth } = require('./source-health')
 const {
   cloud, UPLOADS_DIR: UPLOADS,
   readIndex, writeIndex, readProposal, writeProposal, deleteProposal,
-  readStandards, writeStandards, readUsers, writeUsers, readCompanies, writeCompanies,
+  readStandards, writeStandards, upsertStandards, readUsers, writeUsers, readCompanies, writeCompanies,
   readInvites, writeInvites, writeAudit, readAudit,
   saveUpload, readUpload, deleteUpload, standardStoreKeys
 } = require('./persistence')
@@ -25,11 +25,14 @@ app.use(cors())
 app.use(express.json({ limit: '50mb' }))
 
 app.get('/api/health', (_req, res) => {
+  const ai = aiConfiguration()
   res.json({
     ok: true,
     persistence: cloud ? 'supabase' : 'local',
-    aiEnabled: process.env.AI_ENABLED === 'true',
-    webSearchEnabled: process.env.AI_WEB_SEARCH_ENABLED === 'true'
+    aiEnabled: ai.enabled,
+    aiConfigured: ai.configured,
+    aiModel: ai.model,
+    webSearchEnabled: ai.webSearchEnabled
   })
 })
 
@@ -365,6 +368,12 @@ app.get('/api/source-categories', (_req, res) => {
   res.json(SOURCE_CATEGORIES)
 })
 
+app.get('/api/admin/ai-status', async (req, res) => {
+  const user = await currentUser(req)
+  if (!isAdmin(user)) return res.status(403).json({ error: 'Administrator access required' })
+  res.json(await checkConnection())
+})
+
 app.get('/api/proposals/:id/analysis-sources', async (req, res) => {
   const proposal = await readProposal(req.params.id)
   if (!proposal) return res.status(404).json({ error: 'Proposal not found' })
@@ -499,7 +508,7 @@ async function healthPayload(user) {
     health: effectiveHealth(doc)
   })))
   const notifications = sources
-    .filter(source => source.health.status !== 'healthy' && !source.health.acknowledgedAt)
+    .filter(source => ['broken', 'changed', 'missing_url'].includes(source.health.status) && !source.health.acknowledgedAt)
     .map(source => ({
       id: `${source.id}:${source.health.status}`,
       documentId: source.id,
@@ -516,15 +525,14 @@ async function healthPayload(user) {
   return { counts, notificationCount: notifications.length, notifications, sources, categories: SOURCE_CATEGORIES }
 }
 
-async function checkStandardsStore(storeKey, documentIds = null) {
+async function checkStandardsStore(storeKey, documentIds = null, limit = null) {
   const documents = await readStandards(storeKey)
-  const targets = documentIds ? documents.filter(doc => documentIds.includes(doc.id)) : documents
-  for (let index = 0; index < targets.length; index += 4) {
-    const batch = targets.slice(index, index + 4)
-    const checks = await Promise.all(batch.map(doc => checkSourceUrl(doc.sourceUrl, effectiveHealth(doc))))
-    batch.forEach((doc, batchIndex) => { doc.health = mergeHealth(effectiveHealth(doc), checks[batchIndex]) })
-  }
-  await writeStandards(storeKey, documents)
+  let targets = documentIds ? documents.filter(doc => documentIds.includes(doc.id)) : [...documents]
+  targets.sort((a, b) => String(effectiveHealth(a).checkedAt || '').localeCompare(String(effectiveHealth(b).checkedAt || '')))
+  if (limit) targets = targets.slice(0, limit)
+  const checks = await Promise.all(targets.map(doc => checkSourceUrl(doc.sourceUrl, effectiveHealth(doc))))
+  targets.forEach((doc, index) => { doc.health = mergeHealth(effectiveHealth(doc), checks[index]) })
+  await upsertStandards(storeKey, targets)
   return targets.length
 }
 
@@ -541,7 +549,8 @@ app.post('/api/admin/source-health/check', async (req, res) => {
     const requestedId = req.body.documentId || null
     let checked = 0
     for (const store of await standardsStoresForAdmin(user)) {
-      checked += await checkStandardsStore(store.key, requestedId ? [requestedId] : null)
+      checked += await checkStandardsStore(store.key, requestedId ? [requestedId] : null, requestedId ? null : Math.max(0, 12 - checked))
+      if (!requestedId && checked >= 12) break
     }
     await writeAudit({ event: 'source_health_check', userId: user.id, checked })
     res.json({ checked, ...await healthPayload(user) })
@@ -807,15 +816,56 @@ app.post('/api/proposals/:id/versions', upload.single('file'), async (req, res) 
 app.post('/api/proposals/:id/compliance-review', async (req, res) => {
   try {
     const p = await readProposal(req.params.id)
+    if (!p) return res.status(404).json({ error: 'Proposal not found' })
     const allDocs = await readAnalysisStandards(req)
     const sourceStatus = buildSourceStatus(allDocs, p)
     const docs = matchingDocuments(allDocs, p)
-    if (!docs.length) return res.status(400).json({
-      error: allDocs.length
-        ? 'No extracted library sources match this proposal location and client. Check the source tags or extract pending documents.'
-        : 'The standards repository is empty. Upload and extract standards or site reports before running the comparison.',
-      sourceStatus
-    })
+    const catalogDocs = researchDocuments(allDocs, p)
+    if (!docs.length) {
+      if (!catalogDocs.length) return res.status(400).json({ error: 'No extracted standards or relevant catalog sources are available for this proposal.', sourceStatus })
+      if (process.env.AI_WEB_SEARCH_ENABLED !== 'true') {
+        const error = new Error('No extracted standards match this proposal, and catalog research is disabled. Enable AI web research or upload and extract the controlling standards.')
+        error.statusCode = 503
+        throw error
+      }
+      const catalogSchema = {
+        type: 'object', additionalProperties: false,
+        required: ['jurisdiction', 'projectScope', 'matrix', 'missingSources'],
+        properties: {
+          jurisdiction: requirementSchema.properties.jurisdiction,
+          projectScope: requirementSchema.properties.projectScope,
+          matrix: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['subject', 'requirement', 'cityStandard', 'siteRequirement', 'proposalValue', 'controllingValue', 'result', 'reason', 'recommendedCorrection', 'source'], properties: {
+            subject: { type: 'string' }, requirement: { type: 'string' }, cityStandard: { type: ['string', 'null'] }, siteRequirement: { type: ['string', 'null'] }, proposalValue: { type: ['string', 'null'] }, controllingValue: { type: ['string', 'null'] }, result: { type: 'string', enum: ['pass', 'fail', 'review'] }, reason: { type: 'string' }, recommendedCorrection: { type: 'string' },
+            source: { type: ['object', 'null'], additionalProperties: false, required: ['title', 'url', 'page', 'excerpt', 'authorityLevel', 'documentStatus'], properties: { title: { type: 'string' }, url: { type: 'string' }, page: { type: ['integer', 'null'] }, excerpt: { type: 'string' }, authorityLevel: { type: 'string' }, documentStatus: { type: 'string' } } }
+          }}},
+          missingSources: { type: 'array', items: { type: 'string' } }
+        }
+      }
+      const researched = await structuredResponse({
+        name: 'catalog_standards_comparison',
+        schema: catalogSchema,
+        instructions: `Assist a licensed civil engineer and public-procurement reviewer. Research and compare the submitted proposal only against sources in the supplied Utah catalog and their directly linked official materials. Use this precedence: (1) addenda and written clarifications; (2) executed contract, special provisions, plans, and specifications; (3) solicitation and evaluation criteria; (4) the expressly incorporated municipal standards edition; (5) applicable law, permits, and funding rules; (6) adopted municipal code/plans/policies; (7) maps, portals, planning studies, and historical data. Never substitute the newest edition for the incorporated edition. Score only solicitation criteria. A pass or fail requires a proposal passage and a verified controlling requirement; otherwise return review. Treat hazards, GIS, groundwater, soils, environmental, and historical sources as screening unless confirmed by the responsible professional or agency. Never use protected-class data, political activity, personal information, restricted archaeology, or sensitive utility/security details. Every source URL must be one you actually inspected with web search.`,
+        input: `PROPOSAL: ${p.name}\nCLIENT: ${p.company || ''}\nLOCATION: ${p.location || ''}\n\nPROPOSAL TEXT:\n${(p.text_content || '').slice(0, 150000)}\n\nUTAH SOURCE CATALOG:\n${JSON.stringify(catalogDocs.slice(0, 180).map(doc => ({ title: doc.title, category: documentCategory(doc), url: doc.sourceUrl, jurisdiction: doc.jurisdiction, authorityLevel: doc.authorityLevel, documentStatus: doc.documentStatus, notes: doc.notes })))}`,
+        maxOutputTokens: 10000,
+        webSearchDomains: researchDomainsForDocuments(catalogDocs)
+      })
+      const verifiedUrls = new Set(researched.sources.map(source => source.url))
+      const matrix = researched.data.matrix.map((row, index) => {
+        const sourceVerified = !row.source || verifiedUrls.has(row.source.url)
+        return {
+          id: `catalog-${index + 1}`,
+          ...row,
+          result: sourceVerified ? row.result : 'review',
+          reason: sourceVerified ? row.reason : `${row.reason} Citation could not be verified in the API response; engineer review required.`,
+          source: sourceVerified ? row.source : null
+        }
+      })
+      const summary = { pass: matrix.filter(row => row.result === 'pass').length, fail: matrix.filter(row => row.result === 'fail').length, review: matrix.filter(row => row.result === 'review').length }
+      p.complianceReview = { ...researched.data, matrix, summary, sourceStatus, matchedDocumentIds: [], webSources: researched.sources, generatedAt: new Date().toISOString(), openai: { responseId: researched.responseId, model: researched.model }, decisionPolicy: 'Catalog-assisted screening; only verified, project-applicable controlling sources may support pass/fail. Final approval remains with the responsible engineer.' }
+      p.updated_at = new Date().toISOString()
+      await writeProposal(p.id, p)
+      return res.json(p.complianceReview)
+    }
 
     const extracted = await extractRequirements(p.text_content || '', `PROPOSAL: ${p.name}\nCLIENT: ${p.company}\nSUBMITTED LOCATION: ${p.location}\nExtract submitted design values, not governing standards.`)
     const proposalRequirements = await addRequirementEmbeddings(extracted.data.requirements)
@@ -880,6 +930,7 @@ app.post('/api/proposals/:id/analyze-diagrams', async (req, res) => {
     const allDocs = await readAnalysisStandards(req)
     const sourceStatus = buildSourceStatus(allDocs, p)
     const matchedDocs = matchingDocuments(allDocs, p)
+    const catalogDocs = researchDocuments(allDocs, p)
     const libraryRequirements = matchedDocs.flatMap(doc => (doc.requirements || []).map(rule => ({
       documentId: doc.id,
       documentTitle: doc.title,
@@ -907,12 +958,12 @@ app.post('/api/proposals/:id/analyze-diagrams', async (req, res) => {
       instructions: `Assist a licensed civil engineer and public-procurement reviewer. Analyze every visible plan, detail, section, table, schedule, form, and contract provision and cite page or sheet identifiers. Compare against the supplied extracted library requirements. Research the project location and governing agencies using allowed authoritative domains. Cover this complete taxonomy:\n${SOURCE_TAXONOMY_TEXT}\nNever invent a requirement, condition, URL, or compliance conclusion. Distinguish controlling adopted requirements from informational evidence. If a needed source is unavailable, stale, or its location relevance cannot be established, mark it missing and use yellow rather than claiming compliance. Apply vendor criteria only when legally permissible. Never expose, summarize, or search for restricted utility or critical-infrastructure details. Research findings are screening evidence, not a substitute for a site-specific stamped report or legal determination.`,
       input: [{ role: 'user', content: [
         { type: 'input_file', filename: p.file_path.split('/').pop(), file_data: `data:application/pdf;base64,${fileBuffer.toString('base64')}` },
-        { type: 'input_text', text: `Review ${p.name}, ${p.company || ''}, ${p.location || ''}.\n\nMATCHED EXTRACTED LIBRARY REQUIREMENTS:\n${JSON.stringify(libraryRequirements)}` }
+        { type: 'input_text', text: `Review ${p.name}, ${p.company || ''}, ${p.location || ''}.\n\nSOURCE PRECEDENCE (highest first): issued addenda/clarifications; executed contract and special provisions/plans/specifications; solicitation and evaluation criteria; expressly incorporated municipal standards edition; applicable law/permits/funding; adopted municipal code/plans/policies; then maps, portals, studies, and historical data. Never substitute the newest edition for the incorporated edition.\n\nMATCHED EXTRACTED LIBRARY REQUIREMENTS:\n${JSON.stringify(libraryRequirements)}\n\nCATALOG SOURCES AVAILABLE FOR AUTHORITATIVE RESEARCH (discovery/screening unless their adoption and project applicability are verified):\n${JSON.stringify(catalogDocs.slice(0, 180).map(doc => ({ title: doc.title, sourceCategory: documentCategory(doc), sourceUrl: doc.sourceUrl, jurisdiction: doc.jurisdiction, authorityLevel: doc.authorityLevel, documentStatus: doc.documentStatus, notes: doc.notes })))}` }
       ]}],
       maxOutputTokens: 10000,
       webSearchDomains: [...new Set([
         ...(process.env.ANALYSIS_SOURCE_DOMAINS || RESEARCH_DOMAINS.join(',')).split(',').map(domain => domain.trim()).filter(Boolean),
-        ...researchDomainsForDocuments(matchedDocs)
+        ...researchDomainsForDocuments(catalogDocs)
       ])].slice(0, 100)
     })
     const verifiedUrls = new Set((analyzed.sources || []).map(source => source.url))
@@ -1009,8 +1060,12 @@ async function runScheduledSourceHealthChecks() {
   sourceMonitorRunning = true
   try {
     const storeKeys = await standardStoreKeys()
-    for (const storeKey of storeKeys) await checkStandardsStore(storeKey)
-    await writeAudit({ event: 'scheduled_source_health_check', checkedStores: storeKeys.length })
+    let checked = 0
+    for (const storeKey of storeKeys) {
+      checked += await checkStandardsStore(storeKey, null, Math.max(0, 12 - checked))
+      if (checked >= 12) break
+    }
+    await writeAudit({ event: 'scheduled_source_health_check', checkedStores: storeKeys.length, checkedSources: checked })
   } catch (error) {
     console.error('Scheduled source health check failed:', error.message)
   } finally {

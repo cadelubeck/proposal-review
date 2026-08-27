@@ -12,13 +12,14 @@ const STATUS = {
 
 export default function SourceAdmin() {
   const nav = useNavigate(); const apiFetch = useApiFetch(); const { user } = useAuth()
-  const [data, setData] = useState(null); const [busy, setBusy] = useState(''); const [error, setError] = useState('')
+  const [data, setData] = useState(null); const [aiStatus, setAiStatus] = useState(null); const [busy, setBusy] = useState(''); const [error, setError] = useState('')
   const isAdmin = ['manager', 'admin'].includes(user?.role)
   const load = async () => {
-    const response = await apiFetch('/api/admin/source-health')
+    const [response, aiResponse] = await Promise.all([apiFetch('/api/admin/source-health'), apiFetch('/api/admin/ai-status')])
     const body = await response.json()
     if (!response.ok) return setError(body.error || 'Source health could not be loaded')
     setData(body)
+    if (aiResponse.ok) setAiStatus(await aiResponse.json())
   }
   useEffect(() => { if (isAdmin) load() }, [isAdmin])
   if (!isAdmin) return <Navigate to="/" replace />
@@ -55,11 +56,16 @@ export default function SourceAdmin() {
     <header style={{ minHeight: 64, padding: '0 24px', background: '#0f172a', color: 'white', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
       <button onClick={() => nav('/standards')} style={headerButton}>← Catalog</button>
       <div style={{ flex: 1 }}><div style={{ fontWeight: 850 }}>Source Health &amp; Notifications</div><div style={{ fontSize: 10, color: '#fbbf24', marginTop: 2 }}>Administrator portal · broken-link and change monitoring</div></div>
-      <button onClick={() => runChecks()} disabled={busy === 'all'} style={{ ...headerButton, background: '#4f46e5', color: 'white' }}>{busy === 'all' ? 'Checking sources…' : 'Run all checks now'}</button>
+      <button onClick={() => runChecks()} disabled={busy === 'all'} style={{ ...headerButton, background: '#4f46e5', color: 'white' }}>{busy === 'all' ? 'Checking sources…' : 'Check next 12 sources'}</button>
     </header>
 
     <main style={{ maxWidth: 1240, margin: '0 auto', padding: 28 }}>
       {error && <div style={{ ...card, color: '#b91c1c', background: '#fef2f2', borderColor: '#fecaca', marginBottom: 16 }}>{error}</div>}
+      <section style={{ ...card, marginBottom: 20, borderColor: aiStatus?.reachable && aiStatus?.enabled ? '#bbf7d0' : '#fde68a', background: aiStatus?.reachable && aiStatus?.enabled ? '#f0fdf4' : '#fffbeb' }}>
+        <div style={sectionHeader}><div><h2 style={title}>AI API connection</h2><div style={subtitle}>Server-side status only; the API key is never sent to the browser.</div></div><Status status={aiStatus?.reachable ? 'healthy' : 'broken'} /></div>
+        <div style={{ fontSize: 13, marginTop: 12 }}><b>{aiStatus?.model || 'Model not reported'}</b> · {aiStatus?.configured ? 'key configured' : 'key missing'} · {aiStatus?.reachable ? 'API reachable' : 'API not reachable'} · {aiStatus?.enabled ? 'analysis enabled' : 'analysis disabled'} · {aiStatus?.webSearchEnabled ? 'catalog web research enabled' : 'catalog web research disabled'}</div>
+        {aiStatus?.error && <div style={{ color: '#92400e', fontSize: 12, marginTop: 8 }}>{aiStatus.error}</div>}
+      </section>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(150px,1fr))', gap: 12, marginBottom: 20 }}>
         <Metric label="Open notifications" value={data?.notificationCount || 0} color="#b91c1c" />
         <Metric label="Healthy" value={counts.healthy || 0} color="#15803d" />
@@ -80,7 +86,7 @@ export default function SourceAdmin() {
       </section>
 
       <section style={card}>
-        <div style={sectionHeader}><div><h2 style={title}>Monitored catalog</h2><div style={subtitle}>Checks run automatically every six hours while the service is running.</div></div><button onClick={() => nav('/standards')} style={secondaryButton}>Manage catalog</button></div>
+        <div style={sectionHeader}><div><h2 style={title}>Monitored catalog</h2><div style={subtitle}>The oldest 12 checks run daily so the free serverless job stays within its runtime limit. Individual sources can be checked immediately.</div></div><button onClick={() => nav('/standards')} style={secondaryButton}>Manage catalog</button></div>
         {!data?.sources?.length && <div style={{ color: '#64748b', paddingTop: 16 }}>No sources are registered.</div>}
         {data?.sources?.map(source => <div key={source.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(240px,2fr) minmax(130px,1fr) minmax(120px,.8fr) auto', gap: 14, alignItems: 'center', padding: '15px 0', borderTop: '1px solid #e2e8f0' }}>
           <div><div style={{ fontWeight: 800 }}>{source.title}</div><div style={{ color: '#64748b', fontSize: 11, marginTop: 4 }}>{categoryLabel(source.sourceCategory)} · {source.visibility}{source.sensitivity === 'restricted' ? ' · restricted' : ''}</div>{source.sourceUrl ? <a href={source.sourceUrl} target="_blank" rel="noreferrer" style={{ display: 'block', color: '#4f46e5', fontSize: 10.5, marginTop: 4, overflowWrap: 'anywhere' }}>{source.sourceUrl}</a> : <div style={{ color: '#c2410c', fontSize: 10.5, marginTop: 4 }}>No URL configured</div>}<button onClick={() => editUrl(source)} disabled={busy === `url-${source.id}`} style={{ border: 0, background: 'none', color: '#6366f1', fontSize: 10.5, fontWeight: 750, padding: '5px 0 0', cursor: 'pointer' }}>{source.sourceUrl ? 'Edit URL' : 'Add URL'}</button></div>

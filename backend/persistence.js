@@ -122,6 +122,14 @@ async function writeStandards(companyId, values) {
   localWrite(path.join(STANDARDS_DIR, `${companyId}.json`), values)
 }
 
+async function upsertStandards(companyId, values) {
+  if (cloud) return Promise.all(values.map(value => upsertRecord('standard', value.id, companyId, value)))
+  const existing = await readStandards(companyId)
+  const byId = new Map(existing.map(value => [value.id, value]))
+  values.forEach(value => byId.set(value.id, value))
+  localWrite(path.join(STANDARDS_DIR, `${companyId}.json`), [...byId.values()])
+}
+
 async function readUsers() {
   if (cloud) return listRecords('user')
   return localRead(path.join(AUTH_DATA_DIR, 'users.json'))
@@ -219,7 +227,7 @@ async function standardStoreKeys() {
 module.exports = {
   cloud, DATA_DIR, UPLOADS_DIR, STANDARDS_DIR, AUTH_DATA_DIR,
   readIndex, writeIndex, readProposal, writeProposal, deleteProposal,
-  readStandards, writeStandards, readUsers, writeUsers, readCompanies, writeCompanies,
+  readStandards, writeStandards, upsertStandards, readUsers, writeUsers, readCompanies, writeCompanies,
   readInvites, writeInvites, writeAudit, readAudit,
   saveUpload, readUpload, deleteUpload, standardStoreKeys
 }

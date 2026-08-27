@@ -66,17 +66,17 @@ function SourceStatus({ status, onOpenLibrary }) {
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start' }}>
       <div>
         <div style={label}>Sources connected to this proposal</div>
-        <div style={{ fontSize: 22, fontWeight: 850, marginTop: 7 }}>{status.matchedDocumentCount} documents · {status.matchedRequirementCount} requirements</div>
-        <div style={{ color: '#64748b', fontSize: 12, marginTop: 5 }}>{status.repositoryDocumentCount} total documents in this account&apos;s repository</div>
+        <div style={{ fontSize: 22, fontWeight: 850, marginTop: 7 }}>{status.matchedDocumentCount} extracted documents · {status.matchedRequirementCount} requirements</div>
+        <div style={{ color: '#64748b', fontSize: 12, marginTop: 5 }}>{status.researchSourceCount || 0} relevant research links · {status.repositoryDocumentCount} total repository records</div>
       </div>
       <button onClick={onOpenLibrary} style={{ ...button, background: '#eef2ff', color: '#4338ca' }}>Manage sources</button>
     </div>
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 15 }}>
-      {status.coverage.map(area => <span key={area.key} title={area.documents.map(doc => doc.title).join(', ') || 'No matching extracted document'} style={{ padding: '6px 9px', borderRadius: 20, fontSize: 11, fontWeight: 750, border: `1px solid ${area.status === 'available' ? '#bbf7d0' : '#fed7aa'}`, color: area.status === 'available' ? '#15803d' : '#c2410c', background: area.status === 'available' ? '#f0fdf4' : '#fff7ed' }}>
-        {area.status === 'available' ? '✓' : 'Missing:'} {area.label}
+      {status.coverage.map(area => <span key={area.key} title={area.documents.map(doc => doc.title).join(', ') || area.catalogSources?.map(doc => doc.title).join(', ') || 'No matching source'} style={{ padding: '6px 9px', borderRadius: 20, fontSize: 11, fontWeight: 750, border: `1px solid ${area.status === 'available' ? '#bbf7d0' : area.status === 'catalogued' ? '#c7d2fe' : '#fed7aa'}`, color: area.status === 'available' ? '#15803d' : area.status === 'catalogued' ? '#4338ca' : '#c2410c', background: area.status === 'available' ? '#f0fdf4' : area.status === 'catalogued' ? '#eef2ff' : '#fff7ed' }}>
+        {area.status === 'available' ? '✓ Extracted:' : area.status === 'catalogued' ? '⌕ Catalogued:' : 'Missing:'} {area.label}
       </span>)}
     </div>
-    {status.pendingDocuments.length > 0 && <div style={{ marginTop: 12, color: '#a16207', fontSize: 12 }}>{status.pendingDocuments.length} uploaded document(s) still need requirement extraction.</div>}
+    {status.pendingDocuments.length > 0 && <div style={{ marginTop: 12, color: '#a16207', fontSize: 12 }}>{status.pendingDocuments.length} source record(s) are URL-only or still need requirement extraction. Catalog-assisted comparisons use verified web research; extracted documents remain stronger evidence.</div>}
   </div>
 }
 const colors = { pass: '#15803d', fail: '#dc2626', review: '#a16207' }

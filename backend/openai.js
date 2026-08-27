@@ -7,6 +7,33 @@ function apiKey() {
   return key
 }
 
+function aiConfiguration() {
+  const key = process.env.OPENAI_API_KEY
+  return {
+    enabled: process.env.AI_ENABLED === 'true',
+    configured: Boolean(key && key !== 'your_key_here'),
+    webSearchEnabled: process.env.AI_WEB_SEARCH_ENABLED === 'true',
+    model: process.env.OPENAI_MODEL || 'gpt-5.6-luna'
+  }
+}
+
+async function checkConnection() {
+  const configuration = aiConfiguration()
+  if (!configuration.configured) return { ...configuration, reachable: false, error: 'OPENAI_API_KEY is not configured' }
+  try {
+    const response = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(configuration.model)}`, {
+      headers: { Authorization: `Bearer ${apiKey()}` },
+      signal: AbortSignal.timeout(10000)
+    })
+    const body = await response.json()
+    return response.ok
+      ? { ...configuration, reachable: true, error: null }
+      : { ...configuration, reachable: false, error: body.error?.message || `OpenAI API returned ${response.status}` }
+  } catch (error) {
+    return { ...configuration, reachable: false, error: error.message }
+  }
+}
+
 function requireAiEnabled() {
   if (process.env.AI_ENABLED !== 'true') {
     const error = new Error('AI analysis is disabled to prevent usage charges. An administrator must explicitly set AI_ENABLED=true after approving an API budget.')
@@ -89,4 +116,4 @@ async function embedTexts(input) {
   return body.data.sort((a, b) => a.index - b.index).map(x => x.embedding)
 }
 
-module.exports = { structuredResponse, embedTexts }
+module.exports = { aiConfiguration, checkConnection, structuredResponse, embedTexts }

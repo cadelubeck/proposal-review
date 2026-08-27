@@ -1088,12 +1088,12 @@ function SourceCoverage({ status }) {
   if (!status) return null
   return <div style={{ textAlign: 'left', padding: '12px 14px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, margin: '0 0 18px' }}>
     <div style={{ fontSize: 10, fontWeight: 800, color: '#475569', textTransform: 'uppercase', letterSpacing: .8 }}>Connected sources</div>
-    <div style={{ fontSize: 12, color: '#64748b', marginTop: 5 }}>{status.matchedDocumentCount} matched library documents · {status.matchedRequirementCount} extracted requirements</div>
+    <div style={{ fontSize: 12, color: '#64748b', marginTop: 5 }}>{status.matchedDocumentCount} matched extracted documents · {status.matchedRequirementCount} requirements · {status.researchSourceCount || 0} catalog research links</div>
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 9 }}>
-      {status.coverage?.map(area => <span key={area.key} style={{ padding: '4px 7px', borderRadius: 20, fontSize: 10.5, fontWeight: 700, color: area.status === 'available' ? '#15803d' : '#c2410c', background: area.status === 'available' ? '#dcfce7' : '#ffedd5' }}>
-        {area.status === 'available' ? '✓' : 'Missing:'} {area.label}
+      {status.coverage?.map(area => <span key={area.key} style={{ padding: '4px 7px', borderRadius: 20, fontSize: 10.5, fontWeight: 700, color: area.status === 'available' ? '#15803d' : area.status === 'catalogued' ? '#4338ca' : '#c2410c', background: area.status === 'available' ? '#dcfce7' : area.status === 'catalogued' ? '#e0e7ff' : '#ffedd5' }}>
+        {area.status === 'available' ? '✓' : area.status === 'catalogued' ? '⌕ Catalog:' : 'Missing:'} {area.label}
       </span>)}
     </div>
-    <div style={{ fontSize: 10.5, color: '#64748b', marginTop: 9 }}>Missing library areas are researched from the configured authoritative domains and are still flagged for engineer verification.</div>
+    <div style={{ fontSize: 10.5, color: '#64748b', marginTop: 9 }}>Catalogued links are available to AI web research but remain screening evidence until adoption, version, and project applicability are verified.</div>
   </div>
 }
