@@ -19,7 +19,7 @@ global.fetch = async (_url, options) => {
   }
 }
 
-const { structuredResponse } = require('./openai')
+const { aiConfiguration, structuredResponse } = require('./openai')
 
 ;(async () => {
   const response = await structuredResponse({
@@ -44,6 +44,8 @@ const { structuredResponse } = require('./openai')
     }),
     /disabled to prevent usage charges/
   )
+  process.env.OPENAI_API_KEY = 'YOUR_OPENAI_API_KEY'
+  assert.equal(aiConfiguration().configured, false)
   console.log('OpenAI request wiring: ok')
 })().catch(error => {
   console.error(error)

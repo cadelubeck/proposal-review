@@ -1,9 +1,13 @@
 const OPENAI_URL = 'https://api.openai.com/v1/responses'
 const EMBEDDINGS_URL = 'https://api.openai.com/v1/embeddings'
 
+function isConfiguredKey(key) {
+  return Boolean(key && !/(your.*key|replace.*key|placeholder)/i.test(key))
+}
+
 function apiKey() {
   const key = process.env.OPENAI_API_KEY
-  if (!key || key === 'your_key_here') throw new Error('OPENAI_API_KEY is not configured')
+  if (!isConfiguredKey(key)) throw new Error('OPENAI_API_KEY is not configured')
   return key
 }
 
@@ -11,7 +15,7 @@ function aiConfiguration() {
   const key = process.env.OPENAI_API_KEY
   return {
     enabled: process.env.AI_ENABLED === 'true',
-    configured: Boolean(key && key !== 'your_key_here'),
+    configured: isConfiguredKey(key),
     webSearchEnabled: process.env.AI_WEB_SEARCH_ENABLED === 'true',
     model: process.env.OPENAI_MODEL || 'gpt-5.6-luna'
   }
