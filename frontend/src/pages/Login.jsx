@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 
 export default function Login() {
@@ -91,6 +91,11 @@ export default function Login() {
             )}
             <Field label="Email Address" type="email" value={form.email} onChange={v => set('email', v)} placeholder="jane@city.gov" autoComplete="email" />
             <Field label="Password" type="password" value={form.password} onChange={v => set('password', v)} placeholder={mode === 'login' ? 'Your password' : 'At least 12 characters'} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} />
+            {mode === 'login' && (
+              <div style={{ textAlign: 'right', marginTop: -8, marginBottom: 16 }}>
+                <Link to={`/forgot-password${form.email ? `?email=${encodeURIComponent(form.email)}` : ''}`} style={{ color: '#a5b4fc', fontSize: 12, fontWeight: 700, textDecoration: 'none' }}>Forgot password?</Link>
+              </div>
+            )}
             {mode === 'register' && (
               <Field label="Confirm Password" type="password" value={form.confirmPassword} onChange={v => set('confirmPassword', v)} placeholder="Repeat password" autoComplete="new-password" />
             )}

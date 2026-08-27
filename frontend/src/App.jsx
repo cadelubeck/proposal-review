@@ -9,6 +9,8 @@ import Profile from './pages/Profile'
 import Standards from './pages/Standards'
 import Compliance from './pages/Compliance'
 import SourceAdmin from './pages/SourceAdmin'
+import ForgotPassword from './pages/ForgotPassword'
+import ResetPassword from './pages/ResetPassword'
 
 function RequireAuth({ children }) {
   const { user, loading } = useAuth()
@@ -32,6 +34,8 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
+          <Route path="/forgot-password" element={<PublicOnly><ForgotPassword /></PublicOnly>} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/" element={<RequireAuth><List /></RequireAuth>} />
           <Route path="/proposal/:id" element={<RequireAuth><Viewer /></RequireAuth>} />
           <Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} />

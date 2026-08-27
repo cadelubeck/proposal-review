@@ -13,6 +13,10 @@ const { RESEARCH_DOMAINS, buildSourceStatus, matchingDocuments, researchDocument
 const { SOURCE_CATEGORIES, SOURCE_CATEGORY_KEYS, categoryDefinition, documentCategory } = require('./source-catalog')
 const { checkSourceUrl, mergeHealth } = require('./source-health')
 const {
+  configuration: passwordResetConfiguration,
+  ensureRecoveryIdentity, sendRecoveryEmail, verifyRecoveryToken, closeRecoverySession, tokenDigest
+} = require('./password-reset')
+const {
   cloud, UPLOADS_DIR: UPLOADS,
   readIndex, writeIndex, readProposal, writeProposal, deleteProposal,
   readStandards, writeStandards, upsertStandards, readUsers, writeUsers, readCompanies, writeCompanies,
@@ -32,7 +36,8 @@ app.get('/api/health', (_req, res) => {
     aiEnabled: ai.enabled,
     aiConfigured: ai.configured,
     aiModel: ai.model,
-    webSearchEnabled: ai.webSearchEnabled
+    webSearchEnabled: ai.webSearchEnabled,
+    passwordResetConfigured: passwordResetConfiguration().configured
   })
 })
 
@@ -292,6 +297,75 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({ token, user: publicUser })
   } catch (e) {
     res.status(500).json({ error: e.message })
+  }
+})
+
+const PASSWORD_RESET_RESPONSE = 'If an account exists for that email, a password-reset link has been sent.'
+const passwordResetRequests = new Map()
+
+function passwordResetRateLimited(req, email) {
+  const key = crypto.createHash('sha256').update(`${req.ip || 'unknown'}|${email}`).digest('hex')
+  const now = Date.now()
+  const recent = (passwordResetRequests.get(key) || []).filter(timestamp => now - timestamp < 15 * 60 * 1000)
+  if (recent.length >= 3) return true
+  recent.push(now)
+  passwordResetRequests.set(key, recent)
+  if (passwordResetRequests.size > 1000) {
+    for (const [candidate, timestamps] of passwordResetRequests) {
+      if (!timestamps.some(timestamp => now - timestamp < 15 * 60 * 1000)) passwordResetRequests.delete(candidate)
+    }
+  }
+  return false
+}
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase()
+  if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' })
+  if (!passwordResetConfiguration().configured) return res.status(503).json({ error: 'Password reset email is not configured.' })
+  if (passwordResetRateLimited(req, email)) return res.json({ message: PASSWORD_RESET_RESPONSE })
+
+  try {
+    const user = (await readUsers()).find(candidate => candidate.email.toLowerCase() === email)
+    if (user) {
+      await ensureRecoveryIdentity(email)
+      await sendRecoveryEmail(email)
+      await writeAudit({ event: 'password_reset_requested', userId: user.id })
+    } else {
+      await writeAudit({ event: 'password_reset_requested_unknown_email', userId: null })
+    }
+  } catch (error) {
+    console.error('Password reset request failed:', error.message)
+    await writeAudit({ event: 'password_reset_request_failed', userId: null, error: error.message })
+  }
+  res.json({ message: PASSWORD_RESET_RESPONSE })
+})
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  const accessToken = String(req.body?.accessToken || '')
+  const password = String(req.body?.password || '')
+  if (!accessToken) return res.status(400).json({ error: 'This password-reset link is missing or invalid.' })
+  if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters.' })
+  if (Buffer.byteLength(password, 'utf8') > 72) return res.status(400).json({ error: 'Password must be 72 characters or fewer.' })
+
+  try {
+    const recoveryUser = await verifyRecoveryToken(accessToken)
+    if (!recoveryUser?.email) return res.status(401).json({ error: 'This password-reset link is invalid or expired. Request a new link.' })
+    const users = await readUsers()
+    const user = users.find(candidate => candidate.email.toLowerCase() === recoveryUser.email.toLowerCase())
+    if (!user) return res.status(401).json({ error: 'This password-reset link is invalid or expired. Request a new link.' })
+    const digest = tokenDigest(accessToken)
+    if (user.lastPasswordResetTokenHash === digest) return res.status(409).json({ error: 'This password-reset link has already been used. Request a new link.' })
+
+    user.passwordHash = await bcrypt.hash(password, 12)
+    user.lastPasswordResetTokenHash = digest
+    user.passwordChangedAt = new Date().toISOString()
+    await writeUsers(users)
+    await closeRecoverySession(accessToken)
+    await writeAudit({ event: 'password_reset_completed', userId: user.id })
+    res.json({ message: 'Your password has been updated. You can now sign in.' })
+  } catch (error) {
+    console.error('Password reset failed:', error.message)
+    res.status(500).json({ error: 'Unable to reset the password right now. Please request a new link and try again.' })
   }
 })
 

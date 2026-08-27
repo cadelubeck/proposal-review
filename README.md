@@ -18,6 +18,7 @@ Create `backend/.env`:
 
 ```bash
 JWT_SECRET=use-a-long-random-production-secret
+APP_URL=http://localhost:5173
 
 # AI is deliberately off unless an administrator approves a paid API budget.
 AI_ENABLED=false
@@ -90,7 +91,8 @@ Deployment preparation:
 1. Confirm the Supabase project is on Free and the Vercel account is on Hobby.
 2. Apply `supabase/migrations/` to the linked Supabase project.
 3. Add `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `JWT_SECRET`, and
-   `CRON_SECRET` to Vercel server environment variables. Leave `AI_ENABLED=false`.
+   `CRON_SECRET` to Vercel server environment variables. Set `APP_URL` to the
+   canonical production origin used in Supabase Auth redirect settings. Leave `AI_ENABLED=false`.
 4. Import the GitHub repository into Vercel. `vercel.json` builds the Vite app,
    routes `/api/*` to Express, and runs the protected source-health check weekly.
 5. On an empty target, migrate local prototype data with
