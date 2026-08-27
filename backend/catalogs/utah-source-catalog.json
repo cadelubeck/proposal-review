@@ -815,10 +815,10 @@
       }
     },
     {
-      "id": "utah-catalog-earthquake-and-other-natural-hazards-5b47d0bb308b",
+      "id": "utah-catalog-earthquake-and-other-natural-hazards-9812e5b142e5",
       "title": "FEMA Map Service Center",
       "documentType": "authoritative_portal",
-      "sourceCategory": "contract_requirements",
+      "sourceCategory": "natural_hazards",
       "jurisdiction": "Utah",
       "client": "",
       "projectTypes": [],
@@ -843,10 +843,10 @@
       }
     },
     {
-      "id": "utah-catalog-earthquake-and-other-natural-hazards-2f7654710c76",
+      "id": "utah-catalog-earthquake-and-other-natural-hazards-99178a98e984",
       "title": "Utah Flood Hazards mapping guidance",
       "documentType": "authoritative_portal",
-      "sourceCategory": "contract_requirements",
+      "sourceCategory": "natural_hazards",
       "jurisdiction": "Utah",
       "client": "",
       "projectTypes": [],
