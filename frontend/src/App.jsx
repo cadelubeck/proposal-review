@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import List from './pages/List'
 import Viewer from './pages/Viewer'
@@ -7,7 +7,6 @@ import Login from './pages/Login'
 import MyWork from './pages/MyWork'
 import Profile from './pages/Profile'
 import Standards from './pages/Standards'
-import Compliance from './pages/Compliance'
 import SourceAdmin from './pages/SourceAdmin'
 import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
@@ -29,6 +28,11 @@ function PublicOnly({ children }) {
   return user ? <Navigate to="/" replace /> : children
 }
 
+function LegacyComplianceRedirect() {
+  const { id } = useParams()
+  return <Navigate to={`/proposal/${id}/ai-review#controlling-standards`} replace />
+}
+
 export default function App() {
   return (
     <AuthProvider>
@@ -43,7 +47,7 @@ export default function App() {
           <Route path="/my-work" element={<RequireAuth><MyWork /></RequireAuth>} />
           <Route path="/profile" element={<RequireAuth><Profile /></RequireAuth>} />
           <Route path="/standards" element={<RequireAuth><Standards /></RequireAuth>} />
-          <Route path="/proposal/:id/compliance" element={<RequireAuth><Compliance /></RequireAuth>} />
+          <Route path="/proposal/:id/compliance" element={<RequireAuth><LegacyComplianceRedirect /></RequireAuth>} />
           <Route path="/proposal/:id/ai-review" element={<RequireAuth><AiReview /></RequireAuth>} />
           <Route path="/admin/sources" element={<RequireAuth><SourceAdmin /></RequireAuth>} />
         </Routes>

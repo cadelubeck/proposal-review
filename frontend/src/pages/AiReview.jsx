@@ -66,6 +66,12 @@ export default function AiReview() {
     if (activeType && !polling.current) continueOperation(activeType)
   }, [activeType])
 
+  useEffect(() => {
+    if (results.standards_comparison && window.location.hash === '#controlling-standards') {
+      requestAnimationFrame(() => document.getElementById('controlling-standards')?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+    }
+  }, [results.standards_comparison])
+
   const request = async (url, options) => {
     const response = await apiFetch(url, options)
     const data = await readJson(response)
@@ -229,7 +235,8 @@ export default function AiReview() {
 
       <PageTracker job={jobs.document_review} review={results.document_review} limits={runtime?.aiReviewLimits} />
       <SourceSummary sources={sources} />
-      <Results results={results} onOpenComparison={() => nav(`/proposal/${id}/compliance`)} />
+      <Results results={results} />
+      <StandardsComparison review={results.standards_comparison} />
     </main>
   </div>
 }
@@ -309,7 +316,7 @@ function SourceSummary({ sources }) {
   </section>
 }
 
-function Results({ results, onOpenComparison }) {
+function Results({ results }) {
   const document = results.document_review
   const comparison = results.standards_comparison
   const diagrams = results.diagram_analysis
@@ -317,19 +324,70 @@ function Results({ results, onOpenComparison }) {
   return <section style={card}>
     <div style={eyebrow}>Saved AI results</div>
     {document && <div style={resultRow}><div><b>Document review</b><div style={resultText}>{document.reviewedPages} pages reviewed · {document.counts?.red || 0} red · {document.counts?.yellow || 0} yellow · {document.counts?.green || 0} green</div></div><span style={statusPill(document.status)}>{document.status}</span></div>}
-    {comparison && <div style={resultRow}><div><b>Standards comparison</b><div style={resultText}>{comparison.summary?.fail || 0} fail · {comparison.summary?.review || 0} engineer review · {comparison.summary?.pass || 0} pass</div></div><button onClick={onOpenComparison} style={smallButton}>View comparison</button></div>}
+    {comparison && <div style={resultRow}><div><b>Standards comparison</b><div style={resultText}>{comparison.summary?.fail || 0} fail · {comparison.summary?.review || 0} engineer review · {comparison.summary?.pass || 0} pass</div></div><span style={statusPill('completed')}>shown below</span></div>}
     {diagrams && <div style={resultRow}><div><b>Diagram analysis</b><div style={resultText}>{diagrams.diagrams?.length || 0} diagrams found · {diagrams.criticalIssues?.length || 0} critical issues</div></div><span style={statusPill('completed')}>complete</span></div>}
   </section>
+}
+
+function StandardsComparison({ review }) {
+  if (!review) return null
+  const matrix = review.matrix || []
+  return <section id="controlling-standards" style={{ ...card, marginTop: 16, padding: 0, overflow: 'hidden' }}>
+    <div style={{ padding: 18, borderBottom: '1px solid #e2e8f0' }}>
+      <div style={eyebrow}>Controlling standards</div>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginTop: 6, flexWrap: 'wrap' }}>
+        <div>
+          <h2 style={{ fontSize: 20, marginBottom: 5 }}>State and city standards comparison</h2>
+          <div style={{ color: '#64748b', fontSize: 12 }}>
+            {(review.jurisdiction?.state || review.sourceStatus?.jurisdiction?.state || 'State')} → {(review.jurisdiction?.city || review.sourceStatus?.jurisdiction?.city || 'City')} · {(review.projectScope || []).join(', ') || 'Scope not identified'}
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Count label="Pass" value={review.summary?.pass || 0} color="#15803d" />
+          <Count label="Fail" value={review.summary?.fail || 0} color="#dc2626" />
+          <Count label="Engineer review" value={review.summary?.review || 0} color="#a16207" />
+        </div>
+      </div>
+    </div>
+    {matrix.length ? <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+        <thead><tr>{['Requirement', 'City / client', 'Site-specific', 'Proposal', 'Controlling', 'Result', 'Reason & correction', 'Citation'].map(column => <th key={column} style={tableHead}>{column}</th>)}</tr></thead>
+        <tbody>{matrix.map((row, index) => <tr key={row.id || `${row.subject}-${index}`}>
+          <td style={tableCell}><b>{row.subject}</b><div style={{ color: '#64748b', marginTop: 3 }}>{row.requirement}</div></td>
+          <td style={tableCell}>{row.cityStandard || '—'}</td>
+          <td style={tableCell}>{row.siteRequirement || '—'}</td>
+          <td style={tableCell}>{row.proposalValue || '—'}</td>
+          <td style={tableCell}><b>{row.controllingValue || 'Unresolved'}</b></td>
+          <td style={tableCell}><span style={comparisonPill(row.result)}>{(row.result || 'review').toUpperCase()}</span></td>
+          <td style={tableCell}>{row.reason}<div style={{ color: '#7c3aed', marginTop: 5 }}>{row.recommendedCorrection}</div></td>
+          <td style={tableCell}>{row.source ? <><b>{row.source.title}</b><div style={{ marginTop: 3 }}>Page {row.source.page || 'not identified'}</div>{row.source.excerpt && <div style={{ color: '#64748b', marginTop: 4 }}>&ldquo;{row.source.excerpt}&rdquo;</div>}</> : 'No controlling citation'}</td>
+        </tr>)}</tbody>
+      </table>
+    </div> : <div style={{ padding: 18, color: '#64748b' }}>The comparison completed without returning matrix rows. Engineer review is required.</div>}
+    <div style={{ padding: '12px 18px', background: '#f8fafc', color: '#64748b', fontSize: 11, borderTop: '1px solid #e2e8f0' }}>
+      Decision policy: {review.decisionPolicy || 'Final approval remains with the responsible engineer.'}
+    </div>
+  </section>
+}
+
+function Count({ label, value, color }) {
+  return <div style={{ minWidth: 76, padding: '8px 10px', borderRadius: 9, background: `${color}10`, border: `1px solid ${color}30`, textAlign: 'center' }}>
+    <div style={{ fontSize: 9, color, fontWeight: 850, textTransform: 'uppercase' }}>{label}</div>
+    <div style={{ fontSize: 20, color, fontWeight: 900, marginTop: 2 }}>{value}</div>
+  </div>
 }
 
 const labels = { document_review: 'Document review', standards_comparison: 'Standards comparison', diagram_analysis: 'Diagram analysis' }
 const runLabels = { document_review: 'Run AI API — 3 pages at a time', standards_comparison: 'Run structured standards comparison', diagram_analysis: 'Analyze diagrams' }
 const card = { background: 'white', border: '1px solid #e2e8f0', borderRadius: 13, padding: 18, boxShadow: '0 2px 8px rgba(15,23,42,.05)' }
 const darkButton = { border: 0, borderRadius: 8, padding: '8px 12px', cursor: 'pointer', fontWeight: 750, background: '#1e293b', color: '#cbd5e1' }
-const smallButton = { border: 0, borderRadius: 7, padding: '7px 10px', cursor: 'pointer', fontWeight: 750, background: '#eef2ff', color: '#4338ca' }
 const eyebrow = { fontSize: 10, color: '#64748b', textTransform: 'uppercase', letterSpacing: .9, fontWeight: 850 }
 const errorStyle = { padding: 13, background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', borderRadius: 9, marginBottom: 16 }
 const warningStyle = { padding: 13, background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', borderRadius: 9, marginBottom: 16 }
 const resultRow = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '13px 0', borderBottom: '1px solid #f1f5f9' }
 const resultText = { color: '#64748b', fontSize: 12, marginTop: 4 }
 const statusPill = status => ({ padding: '5px 9px', borderRadius: 20, fontSize: 10, fontWeight: 850, textTransform: 'uppercase', background: status === 'completed' ? '#dcfce7' : '#fef3c7', color: status === 'completed' ? '#15803d' : '#a16207' })
+const comparisonColors = { pass: '#15803d', fail: '#dc2626', review: '#a16207' }
+const comparisonPill = result => ({ padding: '4px 8px', borderRadius: 20, fontWeight: 850, color: comparisonColors[result] || comparisonColors.review, background: `${comparisonColors[result] || comparisonColors.review}14` })
+const tableHead = { textAlign: 'left', padding: 12, background: '#f8fafc', borderBottom: '1px solid #cbd5e1', color: '#475569', whiteSpace: 'nowrap' }
+const tableCell = { padding: 12, borderBottom: '1px solid #e2e8f0', verticalAlign: 'top', minWidth: 110, lineHeight: 1.45 }
