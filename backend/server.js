@@ -7,7 +7,8 @@ const crypto = require('crypto')
 const cors = require('cors')
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
-const { aiConfiguration, checkConnection, retrieveBackgroundStructuredResponse, startBackgroundStructuredResponse, structuredResponse, embedTexts } = require('./openai')
+const { aiConfiguration, cancelBackgroundResponse, checkConnection, retrieveBackgroundStructuredResponse, startBackgroundStructuredResponse, structuredResponse, embedTexts } = require('./openai')
+const { pdfPageBatch, pdfPageCount, splitTextPages } = require('./document-pages')
 const { buildMatrix } = require('./compliance')
 const { RESEARCH_DOMAINS, buildSourceStatus, matchingDocuments, researchDocuments } = require('./source-context')
 const { SOURCE_CATEGORIES, SOURCE_CATEGORY_KEYS, categoryDefinition, documentCategory } = require('./source-catalog')
@@ -37,6 +38,12 @@ app.get('/api/health', (_req, res) => {
     aiConfigured: ai.configured,
     aiModel: ai.model,
     webSearchEnabled: ai.webSearchEnabled,
+    aiReviewLimits: {
+      batchSize: AI_REVIEW_BATCH_SIZE,
+      maxPages: AI_REVIEW_MAX_PAGES,
+      maxMinutes: AI_REVIEW_MAX_MINUTES,
+      maxTokens: AI_REVIEW_MAX_TOKENS
+    },
     passwordResetConfigured: passwordResetConfiguration().configured
   })
 })
@@ -47,6 +54,11 @@ if (process.env.NODE_ENV === 'production' && JWT_SECRET === 'dev-secret-please-s
 }
 
 const SHARED_STANDARDS_KEY = '_shared'
+const AI_REVIEW_BATCH_SIZE = 3
+const AI_REVIEW_MAX_PAGES = Math.max(3, Math.min(120, Number(process.env.AI_REVIEW_MAX_PAGES) || 30))
+const AI_REVIEW_MAX_MINUTES = Math.max(1, Math.min(60, Number(process.env.AI_REVIEW_MAX_MINUTES) || 5))
+const AI_REVIEW_MAX_TOKENS = Math.max(10000, Math.min(500000, Number(process.env.AI_REVIEW_MAX_TOKENS) || 75000))
+const ACTIVE_AI_STATUSES = new Set(['queued', 'in_progress', 'running'])
 
 // Record API usage and troubleshooting metadata without sensitive request content.
 app.use((req, res, next) => {
@@ -65,7 +77,12 @@ app.use((req, res, next) => {
       path: req.path,
       status: res.statusCode,
       durationMs: Date.now() - startedAt,
-      isAiRequest: ['/api/proposals/:id/ai-review', '/api/proposals/:id/analyze-diagrams', '/api/proposals/:id/compliance-review']
+      isAiRequest: [
+        '/api/proposals/:id/ai-review', '/api/proposals/:id/analyze-diagrams', '/api/proposals/:id/analyze-diagrams/status',
+        '/api/proposals/:id/compliance-review', '/api/proposals/:id/compliance-review/status',
+        '/api/proposals/:id/document-review/start', '/api/proposals/:id/document-review/advance', '/api/proposals/:id/document-review/status',
+        '/api/proposals/:id/ai/cancel'
+      ]
         .some(pattern => pattern === req.route?.path)
     })
   })
@@ -156,6 +173,40 @@ const catalogComparisonSchema = {
   }
 }
 
+const pageReviewSchema = {
+  type: 'object', additionalProperties: false,
+  required: ['batchSummary', 'pageReviews'],
+  properties: {
+    batchSummary: { type: 'string' },
+    pageReviews: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false,
+        required: ['pageNumber', 'score', 'summary', 'findings'],
+        properties: {
+          pageNumber: { type: 'integer' },
+          score: { type: 'string', enum: ['green', 'yellow', 'red'] },
+          summary: { type: 'string' },
+          findings: {
+            type: 'array',
+            items: {
+              type: 'object', additionalProperties: false,
+              required: ['category', 'severity', 'finding', 'evidence', 'recommendation'],
+              properties: {
+                category: { type: 'string' },
+                severity: { type: 'string', enum: ['info', 'review', 'critical'] },
+                finding: { type: 'string' },
+                evidence: { type: 'string' },
+                recommendation: { type: 'string' }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 const SOURCE_TAXONOMY_TEXT = SOURCE_CATEGORIES
   .map(category => `${category.label}: ${category.description}`)
   .join('\n')
@@ -209,6 +260,101 @@ function completedCatalogReview(researched, sourceStatus) {
   })
   const summary = { pass: matrix.filter(row => row.result === 'pass').length, fail: matrix.filter(row => row.result === 'fail').length, review: matrix.filter(row => row.result === 'review').length }
   return { ...researched.data, matrix, summary, sourceStatus, matchedDocumentIds: [], webSources: researched.sources, generatedAt: new Date().toISOString(), openai: { responseId: researched.responseId, model: researched.model }, decisionPolicy: `Jurisdiction-filtered catalog screening: ${sourceStatus.jurisdiction.state} first, then ${sourceStatus.jurisdiction.city}; other cities and counties excluded. Only verified, project-applicable controlling sources may support pass/fail. Final approval remains with the responsible engineer.` }
+}
+
+function activeAiOperation(proposal) {
+  if (ACTIVE_AI_STATUSES.has(proposal.aiDocumentReviewJob?.status)) return { type: 'document_review', job: proposal.aiDocumentReviewJob }
+  if (ACTIVE_AI_STATUSES.has(proposal.complianceReviewJob?.status)) return { type: 'standards_comparison', job: proposal.complianceReviewJob }
+  if (ACTIVE_AI_STATUSES.has(proposal.diagramAnalysisJob?.status)) return { type: 'diagram_analysis', job: proposal.diagramAnalysisJob }
+  return null
+}
+
+function rejectOverlappingAi(proposal, requestedType, res) {
+  const active = activeAiOperation(proposal)
+  if (!active || active.type === requestedType) return false
+  res.status(409).json({
+    error: `Another AI task is already running (${active.type.replaceAll('_', ' ')}). Wait for it to finish or stop it from the AI Review Center.`,
+    activeOperation: active
+  })
+  return true
+}
+
+function aiRunExpired(job) {
+  return Date.now() - new Date(job.startedAt).getTime() >= AI_REVIEW_MAX_MINUTES * 60 * 1000
+}
+
+function totalUsage(results = []) {
+  return results.reduce((usage, batch) => ({
+    inputTokens: usage.inputTokens + (batch.usage?.inputTokens || 0),
+    outputTokens: usage.outputTokens + (batch.usage?.outputTokens || 0),
+    totalTokens: usage.totalTokens + (batch.usage?.totalTokens || 0)
+  }), { inputTokens: 0, outputTokens: 0, totalTokens: 0 })
+}
+
+function isPdfProposal(proposal) {
+  return proposal.file_content_type === 'application/pdf' || /\.pdf$/i.test(proposal.file_path || '')
+}
+
+async function proposalPageCount(proposal) {
+  if (proposal.file_path && isPdfProposal(proposal)) {
+    return pdfPageCount(await readUpload(proposal.file_path, proposal.file_storage))
+  }
+  return splitTextPages(proposal.text_content || '').length
+}
+
+async function proposalPageBatch(proposal, startPage, endPage) {
+  if (proposal.file_path && isPdfProposal(proposal)) {
+    return (await pdfPageBatch(await readUpload(proposal.file_path, proposal.file_storage), startPage, endPage)).pages
+  }
+  return splitTextPages(proposal.text_content || '').slice(startPage - 1, endPage)
+}
+
+function pageReviewRequest(proposal, pages, sourceStatus, matchedDocs, catalogDocs) {
+  const requirements = matchedDocs.flatMap(doc => (doc.requirements || []).map(rule => ({
+    documentTitle: doc.title,
+    sourceCategory: documentCategory(doc),
+    jurisdiction: doc.jurisdiction,
+    page: rule.page,
+    requirement: rule.description,
+    value: rule.value,
+    unit: rule.unit,
+    excerpt: rule.excerpt
+  }))).slice(0, 80)
+  const catalog = catalogDocs.map(sourceForCatalogPrompt).slice(0, 80)
+  const firstPage = pages[0]?.pageNumber || 1
+  const lastPage = pages.at(-1)?.pageNumber || firstPage
+  return {
+    name: 'proposal_page_review',
+    schema: pageReviewSchema,
+    instructions: `Assist a licensed civil engineer and public-procurement reviewer. Review only the supplied three-page-or-smaller batch. Report a page separately for every supplied page number. Use the proposal text as evidence and use only the supplied extracted requirements as controlling standards. Catalog links are discovery context only and cannot support pass/fail unless an extracted requirement is supplied. Work in strict jurisdiction order: ${sourceStatus.jurisdiction.state} first, then ${sourceStatus.jurisdiction.city}; never apply another city, county, district, or private entity. Use green only when no concern is visible, yellow whenever a professional check or missing source is needed, and red only for a clear material conflict supported by quoted proposal evidence. Do not invent values, drawings, citations, or visible content. An empty/image-only page must be yellow and referred to diagram analysis. Never expose sensitive utility or infrastructure information. Cover this taxonomy:\n${SOURCE_TAXONOMY_TEXT}`,
+    input: `PROPOSAL: ${proposal.name}\nCLIENT: ${proposal.company || ''}\nSTATE: ${sourceStatus.jurisdiction.state}\nCITY: ${sourceStatus.jurisdiction.city}\nBATCH: pages ${firstPage}-${lastPage}\n\nPAGES:\n${pages.map(page => `--- PAGE ${page.pageNumber} ---\n${page.text.slice(0, 12000) || '[No extractable text on this page]'}`).join('\n\n')}\n\nEXTRACTED CONTROLLING REQUIREMENTS (STATE FIRST, THEN CITY):\n${JSON.stringify(requirements)}\n\nJURISDICTION-FILTERED CATALOG LINKS (DISCOVERY ONLY):\n${JSON.stringify(catalog)}`,
+    maxOutputTokens: 2200
+  }
+}
+
+function finalizeDocumentReview(proposal, status, stoppedReason = null) {
+  const job = proposal.aiDocumentReviewJob
+  const pageReviews = (job.results || []).flatMap(batch => batch.pageReviews || [])
+  const counts = { green: 0, yellow: 0, red: 0 }
+  for (const page of pageReviews) counts[page.score] = (counts[page.score] || 0) + 1
+  job.status = status
+  job.stoppedReason = stoppedReason
+  job.completedAt = new Date().toISOString()
+  delete job.currentResponseId
+  delete job.currentResponseStatus
+  proposal.aiDocumentReview = {
+    status,
+    stoppedReason,
+    totalPages: job.totalPages,
+    reviewedPages: job.completedPages,
+    batchSize: job.batchSize,
+    counts,
+    usage: totalUsage(job.results),
+    batches: job.results,
+    pageReviews,
+    generatedAt: job.completedAt
+  }
+  return proposal.aiDocumentReview
 }
 
 async function extractRequirements(text, context) {
@@ -943,10 +1089,188 @@ app.post('/api/proposals/:id/versions', upload.single('file'), async (req, res) 
 })
 
 // ── Full deterministic compliance analysis ──
+app.get('/api/proposals/:id/ai-status', async (req, res) => {
+  const p = await readProposal(req.params.id)
+  if (!p) return res.status(404).json({ error: 'Proposal not found' })
+  res.json({
+    activeOperation: activeAiOperation(p),
+    documentReviewJob: p.aiDocumentReviewJob || null,
+    standardsComparisonJob: p.complianceReviewJob || null,
+    diagramAnalysisJob: p.diagramAnalysisJob || null,
+    documentReview: p.aiDocumentReview || null,
+    standardsComparison: p.complianceReview || null,
+    diagramAnalysis: p.diagramAnalysis || null,
+    limits: { batchSize: AI_REVIEW_BATCH_SIZE, maxPages: AI_REVIEW_MAX_PAGES, maxMinutes: AI_REVIEW_MAX_MINUTES, maxTokens: AI_REVIEW_MAX_TOKENS }
+  })
+})
+
+app.post('/api/proposals/:id/document-review/start', async (req, res) => {
+  try {
+    const p = await readProposal(req.params.id)
+    if (!p) return res.status(404).json({ error: 'Proposal not found' })
+    if (rejectOverlappingAi(p, 'document_review', res)) return
+    if (ACTIVE_AI_STATUSES.has(p.aiDocumentReviewJob?.status)) return res.status(202).json({ job: p.aiDocumentReviewJob })
+    const ai = aiConfiguration()
+    if (!ai.enabled || !ai.configured) return res.status(503).json({ error: !ai.enabled ? 'AI is disabled to prevent usage charges.' : 'OPENAI_API_KEY is not configured.' })
+    const sourceStatus = buildSourceStatus(await readAnalysisStandards(req), p)
+    if (!sourceStatus.jurisdiction.resolved) return res.status(400).json({
+      error: 'Enter a specific city and state before running AI review. Broad multi-city review is not allowed.',
+      sourceStatus
+    })
+    if (!p.file_path && !p.text_content?.trim()) return res.status(400).json({ error: 'This proposal has no document text or PDF to review.' })
+    const totalPages = await proposalPageCount(p)
+    const reviewPageLimit = Math.min(totalPages, AI_REVIEW_MAX_PAGES)
+    const now = new Date().toISOString()
+    p.aiDocumentReviewJob = {
+      id: crypto.randomUUID(), status: 'running', batchSize: AI_REVIEW_BATCH_SIZE,
+      totalPages, reviewPageLimit, completedPages: 0, results: [],
+      model: ai.model, startedAt: now, updatedAt: now,
+      state: sourceStatus.jurisdiction.state, city: sourceStatus.jurisdiction.city
+    }
+    delete p.aiDocumentReview
+    p.updated_at = now
+    await writeProposal(p.id, p)
+    await writeAudit({ event: 'document_ai_review_started', userId: req.user.id, proposalId: p.id, totalPages, reviewPageLimit })
+    res.status(201).json({ job: p.aiDocumentReviewJob, sourceStatus })
+  } catch (error) {
+    console.error('Document AI review start error:', error.message)
+    res.status(errorStatus(error)).json({ error: error.message })
+  }
+})
+
+app.post('/api/proposals/:id/document-review/advance', async (req, res) => {
+  try {
+    const p = await readProposal(req.params.id)
+    const job = p?.aiDocumentReviewJob
+    if (!p || !job) return res.status(404).json({ error: 'No document AI review has been started.' })
+    if (!ACTIVE_AI_STATUSES.has(job.status)) return res.json({ job, review: p.aiDocumentReview || null })
+    if (job.currentResponseId) return res.status(202).json({ job })
+    if (aiRunExpired(job)) {
+      const review = finalizeDocumentReview(p, 'stopped', `${AI_REVIEW_MAX_MINUTES}-minute automatic limit reached.`)
+      await writeProposal(p.id, p)
+      return res.json({ job: p.aiDocumentReviewJob, review })
+    }
+    const usage = totalUsage(job.results)
+    if (usage.totalTokens >= AI_REVIEW_MAX_TOKENS) {
+      const review = finalizeDocumentReview(p, 'stopped', `${AI_REVIEW_MAX_TOKENS.toLocaleString()}-token automatic limit reached.`)
+      await writeProposal(p.id, p)
+      return res.json({ job: p.aiDocumentReviewJob, review })
+    }
+    if (job.completedPages >= job.reviewPageLimit) {
+      const reason = job.totalPages > job.reviewPageLimit ? `${AI_REVIEW_MAX_PAGES}-page automatic limit reached.` : null
+      const review = finalizeDocumentReview(p, reason ? 'stopped' : 'completed', reason)
+      await writeProposal(p.id, p)
+      return res.json({ job: p.aiDocumentReviewJob, review })
+    }
+
+    const startPage = job.completedPages + 1
+    const endPage = Math.min(startPage + AI_REVIEW_BATCH_SIZE - 1, job.reviewPageLimit)
+    const pages = await proposalPageBatch(p, startPage, endPage)
+    const allDocs = await readAnalysisStandards(req)
+    const sourceStatus = buildSourceStatus(allDocs, p)
+    if (job.state !== sourceStatus.jurisdiction.state || job.city !== sourceStatus.jurisdiction.city) {
+      return res.status(409).json({ error: 'The proposal location changed while AI review was running. Stop this review and start again.', sourceStatus })
+    }
+    const started = await startBackgroundStructuredResponse(pageReviewRequest(
+      p, pages, sourceStatus, matchingDocuments(allDocs, p), researchDocuments(allDocs, p)
+    ))
+    job.currentStartPage = startPage
+    job.currentEndPage = endPage
+    job.currentResponseId = started.responseId
+    job.currentResponseStatus = started.status
+    job.status = started.status === 'queued' ? 'queued' : 'in_progress'
+    job.updatedAt = new Date().toISOString()
+    p.updated_at = job.updatedAt
+    await writeProposal(p.id, p)
+    await writeAudit({ event: 'document_ai_batch_started', userId: req.user.id, proposalId: p.id, startPage, endPage })
+    res.status(202).json({ job })
+  } catch (error) {
+    console.error('Document AI review advance error:', error.message)
+    res.status(errorStatus(error)).json({ error: error.message })
+  }
+})
+
+app.get('/api/proposals/:id/document-review/status', async (req, res) => {
+  const p = await readProposal(req.params.id)
+  const job = p?.aiDocumentReviewJob
+  if (!p || !job) return res.status(404).json({ error: 'No document AI review has been started.' })
+  if (!ACTIVE_AI_STATUSES.has(job.status)) return res.json({ job, review: p.aiDocumentReview || null })
+  try {
+    if (aiRunExpired(job)) {
+      if (job.currentResponseId) await cancelBackgroundResponse(job.currentResponseId).catch(() => null)
+      const review = finalizeDocumentReview(p, 'stopped', `${AI_REVIEW_MAX_MINUTES}-minute automatic limit reached.`)
+      await writeProposal(p.id, p)
+      await writeAudit({ event: 'document_ai_review_stopped', userId: req.user.id, proposalId: p.id, reason: review.stoppedReason })
+      return res.json({ job: p.aiDocumentReviewJob, review })
+    }
+    if (!job.currentResponseId) return res.status(202).json({ job, readyForNextBatch: true })
+    const responseId = job.currentResponseId
+    const reviewed = await retrieveBackgroundStructuredResponse(responseId)
+    if (['queued', 'in_progress'].includes(reviewed.status)) {
+      job.status = reviewed.status
+      job.currentResponseStatus = reviewed.status
+      job.updatedAt = new Date().toISOString()
+      await writeProposal(p.id, p)
+      return res.status(202).json({ job })
+    }
+
+    const startPage = job.currentStartPage
+    const endPage = job.currentEndPage
+    const returnedPages = new Map((reviewed.data.pageReviews || [])
+      .filter(page => page.pageNumber >= startPage && page.pageNumber <= endPage)
+      .map(page => [page.pageNumber, page]))
+    const pageReviews = []
+    for (let pageNumber = startPage; pageNumber <= endPage; pageNumber++) {
+      pageReviews.push(returnedPages.get(pageNumber) || {
+        pageNumber, score: 'yellow', summary: 'The AI response did not return a review for this page.',
+        findings: [{ category: 'missing review', severity: 'review', finding: 'Page requires manual review.', evidence: '', recommendation: 'Have the responsible reviewer inspect this page.' }]
+      })
+    }
+    job.results.push({
+      startPage, endPage, batchSummary: reviewed.data.batchSummary,
+      pageReviews, usage: reviewed.usage, responseId: reviewed.responseId, model: reviewed.model,
+      completedAt: new Date().toISOString()
+    })
+    job.completedPages = endPage
+    job.status = 'running'
+    job.updatedAt = new Date().toISOString()
+    delete job.currentResponseId
+    delete job.currentResponseStatus
+    delete job.currentStartPage
+    delete job.currentEndPage
+
+    const usage = totalUsage(job.results)
+    let review = null
+    if (usage.totalTokens >= AI_REVIEW_MAX_TOKENS) {
+      review = finalizeDocumentReview(p, 'stopped', `${AI_REVIEW_MAX_TOKENS.toLocaleString()}-token automatic limit reached.`)
+    } else if (job.completedPages >= job.reviewPageLimit) {
+      const reason = job.totalPages > job.reviewPageLimit ? `${AI_REVIEW_MAX_PAGES}-page automatic limit reached.` : null
+      review = finalizeDocumentReview(p, reason ? 'stopped' : 'completed', reason)
+    }
+    p.updated_at = new Date().toISOString()
+    await writeProposal(p.id, p)
+    await writeAudit({ event: 'document_ai_batch_completed', userId: req.user.id, proposalId: p.id, startPage, endPage, totalTokens: reviewed.usage?.totalTokens || null })
+    if (review) return res.json({ job: p.aiDocumentReviewJob, review })
+    res.status(202).json({ job, readyForNextBatch: true })
+  } catch (error) {
+    job.status = 'failed'
+    job.error = error.message
+    job.failedAt = new Date().toISOString()
+    await writeProposal(p.id, p)
+    await writeAudit({ event: 'document_ai_review_failed', userId: req.user.id, proposalId: p.id, error: error.message })
+    res.status(502).json({ error: `Document AI review failed: ${error.message}`, job })
+  }
+})
+
 app.post('/api/proposals/:id/compliance-review', async (req, res) => {
   try {
     const p = await readProposal(req.params.id)
     if (!p) return res.status(404).json({ error: 'Proposal not found' })
+    if (rejectOverlappingAi(p, 'standards_comparison', res)) return
+    if (ACTIVE_AI_STATUSES.has(p.complianceReviewJob?.status)) {
+      const sourceStatus = buildSourceStatus(await readAnalysisStandards(req), p)
+      return res.status(202).json({ status: p.complianceReviewJob.status, job: p.complianceReviewJob, sourceStatus })
+    }
     const allDocs = await readAnalysisStandards(req)
     const sourceStatus = buildSourceStatus(allDocs, p)
     if (!sourceStatus.jurisdiction.resolved) return res.status(400).json({
@@ -1020,6 +1344,15 @@ app.get('/api/proposals/:id/compliance-review/status', async (req, res) => {
   try {
     const allDocs = await readAnalysisStandards(req)
     const sourceStatus = buildSourceStatus(allDocs, p)
+    if (aiRunExpired(p.complianceReviewJob)) {
+      await cancelBackgroundResponse(p.complianceReviewJob.responseId).catch(() => null)
+      p.complianceReviewJob.status = 'stopped'
+      p.complianceReviewJob.error = `${AI_REVIEW_MAX_MINUTES}-minute automatic limit reached.`
+      p.complianceReviewJob.stoppedAt = new Date().toISOString()
+      await writeProposal(p.id, p)
+      await writeAudit({ event: 'compliance_review_stopped', userId: req.user.id, proposalId: p.id, reason: p.complianceReviewJob.error })
+      return res.status(408).json({ error: p.complianceReviewJob.error, job: p.complianceReviewJob, sourceStatus })
+    }
     if (p.complianceReviewJob.state !== sourceStatus.jurisdiction.state || p.complianceReviewJob.city !== sourceStatus.jurisdiction.city) {
       return res.status(409).json({ error: 'The proposal location changed while the comparison was running. Start a new comparison.', sourceStatus })
     }
@@ -1051,6 +1384,8 @@ app.get('/api/proposals/:id/compliance-review/status', async (req, res) => {
 app.post('/api/proposals/:id/analyze-diagrams', async (req, res) => {
   const p = await readProposal(req.params.id)
   if (!p) return res.status(404).json({ error: 'Not found' })
+  if (rejectOverlappingAi(p, 'diagram_analysis', res)) return
+  if (ACTIVE_AI_STATUSES.has(p.diagramAnalysisJob?.status)) return res.status(202).json({ status: p.diagramAnalysisJob.status, job: p.diagramAnalysisJob })
   if (!p.file_path) return res.status(400).json({ error: 'No PDF file attached' })
   let fileBuffer
   try { fileBuffer = await readUpload(p.file_path, p.file_storage) } catch { return res.status(404).json({ error: 'File not found' }) }
@@ -1108,7 +1443,7 @@ app.post('/api/proposals/:id/analyze-diagrams', async (req, res) => {
       scoringRule: rule.scoringRule,
       missingValueConvention: rule.missingValueConvention
     }))).slice(0, 160)
-    const analyzed = await structuredResponse({
+    const started = await startBackgroundStructuredResponse({
       name: 'diagram_analysis', schema: diagramSchema,
       instructions: `Assist a licensed civil engineer and public-procurement reviewer. Analyze every visible plan, detail, section, table, schedule, form, and contract provision and cite page or sheet identifiers. Compare against the supplied extracted library requirements. Research the project location and governing agencies using allowed authoritative domains. Cover this complete taxonomy:\n${SOURCE_TAXONOMY_TEXT}\nNever invent a requirement, condition, URL, or compliance conclusion. Distinguish controlling adopted requirements from informational evidence. If a needed source is unavailable, stale, or its location relevance cannot be established, mark it missing and use yellow rather than claiming compliance. Apply vendor criteria only when legally permissible. Never expose, summarize, or search for restricted utility or critical-infrastructure details. Research findings are screening evidence, not a substitute for a site-specific stamped report or legal determination.`,
       input: [{ role: 'user', content: [
@@ -1121,25 +1456,99 @@ app.post('/api/proposals/:id/analyze-diagrams', async (req, res) => {
         ...researchDomainsForDocuments(catalogDocs)
       ])].slice(0, 100)
     })
+    p.diagramAnalysisJob = {
+      responseId: started.responseId,
+      status: started.status,
+      model: started.model,
+      state: sourceStatus.jurisdiction.state,
+      city: sourceStatus.jurisdiction.city,
+      startedAt: new Date().toISOString()
+    }
+    p.updated_at = new Date().toISOString()
+    await writeProposal(req.params.id, p)
+    await writeAudit({ event: 'diagram_analysis_started', userId: req.user.id, proposalId: p.id })
+    res.status(202).json({ status: started.status, job: p.diagramAnalysisJob, sourceStatus })
+  } catch (e) { console.error('Diagram analysis error:', e.message); res.status(errorStatus(e)).json({ error: e.message }) }
+})
+
+app.get('/api/proposals/:id/analyze-diagrams/status', async (req, res) => {
+  const p = await readProposal(req.params.id)
+  if (!p) return res.status(404).json({ error: 'Proposal not found' })
+  if (!p.diagramAnalysisJob) {
+    if (p.diagramAnalysis) return res.json(p.diagramAnalysis)
+    return res.status(404).json({ error: 'No diagram analysis is currently running.' })
+  }
+  try {
+    const allDocs = await readAnalysisStandards(req)
+    const sourceStatus = buildSourceStatus(allDocs, p)
+    if (aiRunExpired(p.diagramAnalysisJob)) {
+      await cancelBackgroundResponse(p.diagramAnalysisJob.responseId).catch(() => null)
+      p.diagramAnalysisJob.status = 'stopped'
+      p.diagramAnalysisJob.error = `${AI_REVIEW_MAX_MINUTES}-minute automatic limit reached.`
+      p.diagramAnalysisJob.stoppedAt = new Date().toISOString()
+      await writeProposal(p.id, p)
+      await writeAudit({ event: 'diagram_analysis_stopped', userId: req.user.id, proposalId: p.id, reason: p.diagramAnalysisJob.error })
+      return res.status(408).json({ error: p.diagramAnalysisJob.error, job: p.diagramAnalysisJob, sourceStatus })
+    }
+    if (p.diagramAnalysisJob.state !== sourceStatus.jurisdiction.state || p.diagramAnalysisJob.city !== sourceStatus.jurisdiction.city) {
+      return res.status(409).json({ error: 'The proposal location changed while diagram analysis was running. Stop it and start again.', sourceStatus })
+    }
+    const analyzed = await retrieveBackgroundStructuredResponse(p.diagramAnalysisJob.responseId)
+    if (['queued', 'in_progress'].includes(analyzed.status)) {
+      p.diagramAnalysisJob.status = analyzed.status
+      await writeProposal(p.id, p)
+      return res.status(202).json({ status: analyzed.status, job: p.diagramAnalysisJob, sourceStatus })
+    }
     const verifiedUrls = new Set((analyzed.sources || []).map(source => source.url))
-    const result = {
+    p.diagramAnalysis = {
       ...analyzed.data,
       researchFindings: (analyzed.data.researchFindings || []).filter(finding => verifiedUrls.has(finding.sourceUrl)),
       sourceStatus,
       webSources: analyzed.sources || [],
       generatedAt: new Date().toISOString(),
-      openai: { responseId: analyzed.responseId, model: analyzed.model }
+      openai: { responseId: analyzed.responseId, model: analyzed.model, usage: analyzed.usage }
     }
-    p.diagramAnalysis = result; p.updated_at = new Date().toISOString()
-    await writeProposal(req.params.id, p)
-    res.json(result)
-  } catch (e) { console.error('Diagram analysis error:', e.message); res.status(errorStatus(e)).json({ error: e.message }) }
+    delete p.diagramAnalysisJob
+    p.updated_at = new Date().toISOString()
+    await writeProposal(p.id, p)
+    await writeAudit({ event: 'diagram_analysis_completed', userId: req.user.id, proposalId: p.id })
+    res.json(p.diagramAnalysis)
+  } catch (error) {
+    p.diagramAnalysisJob.status = 'failed'
+    p.diagramAnalysisJob.error = error.message
+    p.diagramAnalysisJob.failedAt = new Date().toISOString()
+    await writeProposal(p.id, p)
+    await writeAudit({ event: 'diagram_analysis_failed', userId: req.user.id, proposalId: p.id, error: error.message })
+    res.status(502).json({ error: `Diagram analysis failed: ${error.message}`, job: p.diagramAnalysisJob })
+  }
+})
+
+app.post('/api/proposals/:id/ai/cancel', async (req, res) => {
+  const p = await readProposal(req.params.id)
+  if (!p) return res.status(404).json({ error: 'Proposal not found' })
+  const active = activeAiOperation(p)
+  if (!active) return res.status(409).json({ error: 'No AI task is currently running.' })
+  const responseId = active.type === 'document_review' ? active.job.currentResponseId : active.job.responseId
+  if (responseId) await cancelBackgroundResponse(responseId).catch(error => console.warn('OpenAI cancellation warning:', error.message))
+  const now = new Date().toISOString()
+  if (active.type === 'document_review') {
+    finalizeDocumentReview(p, 'cancelled', 'Stopped by a user.')
+  } else {
+    active.job.status = 'cancelled'
+    active.job.error = 'Stopped by a user.'
+    active.job.stoppedAt = now
+  }
+  p.updated_at = now
+  await writeProposal(p.id, p)
+  await writeAudit({ event: 'ai_task_cancelled', userId: req.user.id, proposalId: p.id, operation: active.type })
+  res.json({ success: true, operation: active.type, status: 'cancelled' })
 })
 
 // ── AI section review ──
 app.post('/api/proposals/:id/ai-review', async (req, res) => {
   const p = await readProposal(req.params.id)
   if (!p) return res.status(404).json({ error: 'Proposal not found' })
+  if (activeAiOperation(p)) return res.status(409).json({ error: 'Another AI task is already running. Wait for it to finish or stop it from the AI Review Center.' })
   const { sectionId } = req.body
   const secIdx = p.sections.findIndex(s => s.id === sectionId)
   if (secIdx === -1) return res.status(404).json({ error: 'Section not found' })

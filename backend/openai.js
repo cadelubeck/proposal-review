@@ -98,7 +98,15 @@ function responseRequest({ name, schema, instructions, input, maxOutputTokens = 
 function completedResponse(body) {
   const text = responseText(body)
   if (!text) throw new Error('OpenAI returned no structured output')
-  return { data: JSON.parse(text), responseId: body.id, model: body.model, sources: responseSources(body), status: body.status || 'completed' }
+  return {
+    data: JSON.parse(text), responseId: body.id, model: body.model,
+    sources: responseSources(body), status: body.status || 'completed',
+    usage: body.usage ? {
+      inputTokens: body.usage.input_tokens || 0,
+      outputTokens: body.usage.output_tokens || 0,
+      totalTokens: body.usage.total_tokens || 0
+    } : null
+  }
 }
 
 async function structuredResponse(options) {
@@ -135,7 +143,6 @@ async function startBackgroundStructuredResponse(options) {
 
 async function retrieveBackgroundStructuredResponse(responseId) {
   if (!/^resp_[a-zA-Z0-9_-]+$/.test(responseId || '')) throw new Error('Invalid OpenAI background response ID')
-  requireAiEnabled()
   const response = await fetch(`${OPENAI_URL}/${encodeURIComponent(responseId)}`, {
     headers: { Authorization: `Bearer ${apiKey()}` },
     signal: AbortSignal.timeout(15000)
@@ -147,6 +154,18 @@ async function retrieveBackgroundStructuredResponse(responseId) {
     throw new Error(body.error?.message || body.incomplete_details?.reason || `OpenAI background response ended with status ${body.status || 'unknown'}`)
   }
   return completedResponse(body)
+}
+
+async function cancelBackgroundResponse(responseId) {
+  if (!/^resp_[a-zA-Z0-9_-]+$/.test(responseId || '')) throw new Error('Invalid OpenAI background response ID')
+  const response = await fetch(`${OPENAI_URL}/${encodeURIComponent(responseId)}/cancel`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey()}` },
+    signal: AbortSignal.timeout(15000)
+  })
+  const body = await response.json()
+  if (!response.ok) throw new Error(body.error?.message || `OpenAI cancel error ${response.status}`)
+  return { responseId: body.id, status: body.status || 'cancelled' }
 }
 
 async function embedTexts(input) {
@@ -162,4 +181,4 @@ async function embedTexts(input) {
   return body.data.sort((a, b) => a.index - b.index).map(x => x.embedding)
 }
 
-module.exports = { aiConfiguration, checkConnection, retrieveBackgroundStructuredResponse, startBackgroundStructuredResponse, structuredResponse, embedTexts }
+module.exports = { aiConfiguration, cancelBackgroundResponse, checkConnection, retrieveBackgroundStructuredResponse, startBackgroundStructuredResponse, structuredResponse, embedTexts }

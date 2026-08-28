@@ -5,6 +5,9 @@ process.env.AI_ENABLED = 'true'
 process.env.AI_WEB_SEARCH_ENABLED = 'true'
 let requestBody
 global.fetch = async (url, options = {}) => {
+  if (String(url).endsWith('/cancel')) {
+    return { ok: true, json: async () => ({ id: 'resp_backgroundtest', status: 'cancelled' }) }
+  }
   if (options.method === 'GET' || !options.body) {
     return {
       ok: true,
@@ -29,7 +32,7 @@ global.fetch = async (url, options = {}) => {
   }
 }
 
-const { aiConfiguration, retrieveBackgroundStructuredResponse, startBackgroundStructuredResponse, structuredResponse } = require('./openai')
+const { aiConfiguration, cancelBackgroundResponse, retrieveBackgroundStructuredResponse, startBackgroundStructuredResponse, structuredResponse } = require('./openai')
 
 ;(async () => {
   const response = await structuredResponse({
@@ -53,6 +56,8 @@ const { aiConfiguration, retrieveBackgroundStructuredResponse, startBackgroundSt
   const completed = await retrieveBackgroundStructuredResponse(started.responseId)
   assert.equal(completed.status, 'completed')
   assert.deepEqual(completed.data, { result: 'background ok' })
+  const cancelled = await cancelBackgroundResponse(started.responseId)
+  assert.equal(cancelled.status, 'cancelled')
   process.env.AI_ENABLED = 'false'
   await assert.rejects(
     structuredResponse({

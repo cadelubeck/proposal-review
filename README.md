@@ -53,19 +53,25 @@ SOURCE_HEALTH_CHECK_INTERVAL_MS=21600000
 1. Open **Standards** and upload city/client standards plus geotechnical, seismic,
    groundwater, floodplain, and other engineering reports.
 2. Add jurisdiction/client metadata and run **Extract requirements**.
-3. Upload a proposal and open **Controlling Standards**.
-4. Run the full review. OpenAI extracts and matches evidence; application code
-   selects the stricter comparable requirement and evaluates the submitted value.
+3. Upload a proposal and open its **AI Review Center**.
+4. Choose the three-page document review, structured standards comparison, or
+   diagram analysis. Only one AI task can run at a time.
 5. A licensed engineer resolves flagged conflicts and makes the final decision.
 
-The two review controls use different evidence paths:
+The three review controls use different evidence paths:
 
-- **Re-analyze proposal** reads the uploaded PDF, includes requirements from matching extracted library documents, and performs location-specific web research only on `ANALYSIS_SOURCE_DOMAINS`. It records the library coverage and returned web sources with the result.
+- **Run AI API** reviews exact three-page batches, saves progress after every batch, and resumes after a reload.
+- **Analyze diagrams** reads the uploaded PDF, includes requirements from matching extracted library documents, and performs location-specific web research only on `ANALYSIS_SOURCE_DOMAINS`. It records the library coverage and returned web sources with the result.
 - **Run structured standards comparison** does not use general web results as controlling requirements. It extracts submitted values, retrieves matching extracted library requirements, and runs the deterministic comparison engine. An empty or unmatched repository returns an explicit error instead of an empty review.
 
 Both controls require `AI_ENABLED=true`. Web research additionally requires
 `AI_WEB_SEARCH_ENABLED=true`. This opt-in is intentional because OpenAI API and
 web-search usage are billable. Hosting being on a free tier does not make AI calls free.
+
+The three-page document review defaults to automatic limits of 5 minutes, 30
+pages, and 75,000 response-reported tokens. Set `AI_REVIEW_MAX_MINUTES`,
+`AI_REVIEW_MAX_PAGES`, and `AI_REVIEW_MAX_TOKENS` to tighten or relax those
+limits. A user can also stop the active background response from the tracker.
 
 ## Shared source governance
 

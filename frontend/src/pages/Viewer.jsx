@@ -32,8 +32,6 @@ export default function Viewer() {
   const [saving, setSaving] = useState(false)
   const [addSecForm, setAddSecForm] = useState(false)
   const [newSecTitle, setNewSecTitle] = useState('')
-  const [aiLoading, setAiLoading] = useState(null)
-  const [aiError, setAiError] = useState(null)
   const contentRef = useRef(null)
 
   // Layout state
@@ -48,23 +46,11 @@ export default function Viewer() {
   const [versionLabel, setVersionLabel] = useState('')
   const [uploadingVersion, setUploadingVersion] = useState(false)
 
-  // Diagram analysis
-  const [diagramModal, setDiagramModal] = useState(false)
-  const [diagramLoading, setDiagramLoading] = useState(false)
-  const [diagramError, setDiagramError] = useState(null)
-  const [analysisSources, setAnalysisSources] = useState(null)
-  const [runtime, setRuntime] = useState(null)
-
   const load = async () => {
     const r = await apiFetch(`/api/proposals/${id}`)
     if (!r.ok) return nav('/')
     const data = await r.json()
     setProposal(data)
-    apiFetch(`/api/proposals/${id}/analysis-sources`)
-      .then(response => response.ok ? response.json() : null)
-      .then(status => status && setAnalysisSources(status))
-      .catch(() => {})
-    apiFetch('/api/health').then(response => response.ok ? response.json() : null).then(config => config && setRuntime(config)).catch(() => {})
     if (data.sections?.length) setSelectedId(data.sections[0].id)
     if (data.file_path) setViewMode('pdf')
   }
@@ -130,25 +116,6 @@ export default function Viewer() {
     setNewSecTitle(''); setAddSecForm(false); setSelectedId(sec.id)
   }
 
-  const runAiReview = async (sec) => {
-    if (runtime?.aiEnabled === false) return setAiError('AI is disabled to prevent usage charges. An administrator must approve a budget before enabling it.')
-    setAiLoading(sec.id)
-    setAiError(null)
-    try {
-      const r = await apiFetch(`/api/proposals/${id}/ai-review`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sectionId: sec.id })
-      })
-      const result = await r.json()
-      if (!r.ok) throw new Error(result.error || 'AI review failed')
-      updateSection(sec.id, { aiReview: result })
-    } catch (e) {
-      setAiError(e.message)
-    } finally {
-      setAiLoading(null)
-    }
-  }
-
   const uploadNewVersion = async () => {
     if (!versionFile) return
     setUploadingVersion(true)
@@ -164,20 +131,6 @@ export default function Viewer() {
       await load()
     } catch (e) { alert(e.message) }
     finally { setUploadingVersion(false) }
-  }
-
-  const runDiagramAnalysis = async () => {
-    if (runtime?.aiEnabled === false) return setDiagramError('AI is disabled to prevent usage charges. An administrator must approve a budget before enabling it.')
-    setDiagramLoading(true)
-    setDiagramError(null)
-    try {
-      const r = await apiFetch(`/api/proposals/${id}/analyze-diagrams`, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
-      const result = await r.json()
-      if (!r.ok) throw new Error(result.error || 'Analysis failed')
-      setProposal(p => ({ ...p, diagramAnalysis: result }))
-      if (result.sourceStatus) setAnalysisSources(result.sourceStatus)
-    } catch (e) { setDiagramError(e.message) }
-    finally { setDiagramLoading(false) }
   }
 
   const renderText = () => {
@@ -298,9 +251,9 @@ export default function Viewer() {
           )}
         </div>
 
-        <button onClick={() => nav(`/proposal/${id}/compliance`)}
+        <button onClick={() => nav(`/proposal/${id}/ai-review`)} title="Open the single location for document review, standards comparison, and diagram analysis."
           style={{ background: 'linear-gradient(135deg,#4f46e5,#7c3aed)', border: '1px solid #818cf8', color: 'white', padding: '6px 12px', borderRadius: 7, cursor: 'pointer', fontSize: 11, fontWeight: 800, flexShrink: 0 }}>
-          ⚖ Controlling Standards
+          ✦ AI Review Center
         </button>
 
         {/* Version badge */}
@@ -318,27 +271,6 @@ export default function Viewer() {
               : <span>v{currentVersionNum} {(proposal.versions?.length || 0) > 0 ? '▾' : '+'}</span>}
           </button>
         )}
-
-        {/* Diagram analysis button */}
-        {hasFile && (
-          <button onClick={() => setDiagramModal(true)}
-            style={{
-              background: proposal.diagramAnalysis
-                ? (SCORES[proposal.diagramAnalysis.overallCompliance]?.bg)
-                : 'rgba(99,102,241,0.15)',
-              border: proposal.diagramAnalysis
-                ? `1px solid ${SCORES[proposal.diagramAnalysis.overallCompliance]?.border}`
-                : '1px solid rgba(99,102,241,0.3)',
-              color: proposal.diagramAnalysis
-                ? SCORES[proposal.diagramAnalysis.overallCompliance]?.color
-                : '#818cf8',
-              padding: '5px 11px', borderRadius: 7, cursor: 'pointer', fontSize: 11, fontWeight: 700,
-              transition: 'all 0.15s', flexShrink: 0
-            }}>
-            🏗 {proposal.diagramAnalysis ? 'Diagrams' : 'Analyze Diagrams'}
-          </button>
-        )}
-
 
         <div style={{
           padding: '4px 12px', borderRadius: 20, fontSize: 11, fontWeight: 800,
@@ -604,40 +536,16 @@ export default function Viewer() {
                       <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#6366f1', boxShadow: '0 0 0 2px #c7d2fe' }} />
                       <span style={{ fontSize: 10, fontWeight: 800, color: '#4338ca', textTransform: 'uppercase', letterSpacing: 1 }}>AI Review</span>
                     </div>
-                    <button onClick={() => runAiReview(selSec)} disabled={aiLoading === selSec.id || runtime?.aiEnabled === false}
-                      style={{
-                        padding: '5px 12px', borderRadius: 7, border: 'none', cursor: aiLoading === selSec.id || runtime?.aiEnabled === false ? 'default' : 'pointer',
-                        background: aiLoading === selSec.id || runtime?.aiEnabled === false ? '#e0e7ff' : 'linear-gradient(135deg, #4f46e5, #6366f1)',
-                        color: aiLoading === selSec.id || runtime?.aiEnabled === false ? '#818cf8' : 'white',
-                        fontSize: 11, fontWeight: 700, transition: 'all 0.15s',
-                        boxShadow: aiLoading === selSec.id ? 'none' : '0 2px 8px rgba(79,70,229,0.35)'
-                      }}>
-                      {runtime?.aiEnabled === false ? 'AI disabled — cost control' : aiLoading === selSec.id
-                        ? <span><span className="spin">⟳</span> Analyzing…</span>
-                        : selSec.aiReview ? '↻ Re-run' : '✦ Run AI Review'}
-                    </button>
+                    <span style={{ fontSize: 10, color: '#818cf8', fontWeight: 700 }}>Runs from AI Review Center</span>
                   </div>
 
                   <div style={{ padding: '12px 14px' }}>
-                    {aiError && (
-                      <div className="fade-in" style={{ fontSize: 12, color: '#dc2626', padding: '9px 11px', background: '#fef2f2', borderRadius: 8, border: '1px solid #fecaca', marginBottom: 10, lineHeight: 1.5 }}>
-                        {aiError}
-                      </div>
-                    )}
-
-                    {!selSec.aiReview && aiLoading !== selSec.id && !aiError && (
+                    {!selSec.aiReview && (
                       <div style={{ textAlign: 'center', padding: '20px 10px', color: '#94a3b8' }}>
                         <div style={{ fontSize: 28, marginBottom: 10 }}>✦</div>
                         <div style={{ fontSize: 12.5, lineHeight: 1.5, maxWidth: 220, margin: '0 auto' }}>
-                          Compare this requirement against city standards and supporting reports, then review the finding and source before making your decision.
+                          Run proposal AI actions from the AI Review Center in the top bar. Saved findings will remain available here.
                         </div>
-                      </div>
-                    )}
-
-                    {aiLoading === selSec.id && (
-                      <div className="fade-in" style={{ textAlign: 'center', padding: '24px 10px', color: '#6366f1' }}>
-                        <div className="spin" style={{ fontSize: 28, display: 'block', marginBottom: 10 }}>⟳</div>
-                        <div className="pulse" style={{ fontSize: 12, color: '#818cf8' }}>OpenAI is analyzing this section…</div>
                       </div>
                     )}
 
@@ -777,18 +685,6 @@ export default function Viewer() {
         />
       )}
 
-      {/* ── Diagram Modal ── */}
-      {diagramModal && (
-        <DiagramModal
-          proposal={proposal}
-          onClose={() => setDiagramModal(false)}
-          onRun={runDiagramAnalysis}
-          loading={diagramLoading}
-          error={diagramError}
-          sourceStatus={analysisSources}
-          aiEnabled={runtime?.aiEnabled !== false}
-        />
-      )}
     </div>
   )
 }

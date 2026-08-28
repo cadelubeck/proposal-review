@@ -4,7 +4,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node --env-file=.env server.js",
-    "test": "node compliance.test.js && node source-context.test.js && node source-health.test.js && node catalog-import.test.js && node password-reset.test.js && node openai.test.js",
+    "test": "node compliance.test.js && node source-context.test.js && node source-health.test.js && node catalog-import.test.js && node password-reset.test.js && node document-pages.test.js && node openai.test.js",
     "migrate:supabase": "node --env-file=.env migrate-local-to-supabase.js",
     "seed:catalog": "node --env-file=.env.cloud seed-source-catalog.js"
   },

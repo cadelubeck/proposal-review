@@ -50,27 +50,6 @@ export default function Compliance() {
     if (healthResponse.ok) setRuntime(await healthResponse.json())
   }
   useEffect(() => { load() }, [id])
-  const run = async () => {
-    setLoading(true); setError(''); setProgress('Starting jurisdiction-filtered comparison…')
-    try {
-      const response = await apiFetch(`/api/proposals/${id}/compliance-review`, { method: 'POST' })
-      const data = await readJson(response)
-      if (data.sourceStatus) setSourceStatus(data.sourceStatus)
-      if (response.status === 202) {
-        setProposal(current => ({ ...current, complianceReviewJob: data.job }))
-        setProgress(data.status === 'queued' ? 'Comparison queued…' : 'Reviewing state sources, then city sources…')
-        await pollComparison()
-      } else {
-        if (!response.ok) throw new Error(data.error || 'Structured comparison failed.')
-        setProposal(current => ({ ...current, complianceReview: data, complianceReviewJob: null }))
-      }
-    } catch (failure) {
-      setError(failure.message)
-    } finally {
-      setLoading(false)
-      setProgress('')
-    }
-  }
   if (!proposal) return null
   const review = proposal.complianceReview
   return <div style={{ minHeight: '100vh', background: '#f1f5f9' }}>
@@ -78,13 +57,13 @@ export default function Compliance() {
       <button onClick={() => nav(`/proposal/${id}`)} style={button}>← Proposal</button>
       <div style={{ flex: 1 }}><div style={{ fontWeight: 800 }}>Controlling Standards Review</div><div style={{ fontSize: 10, color: '#a5b4fc' }}>{proposal.name} · {proposal.location}</div></div>
       <button onClick={() => nav('/standards')} style={button}>Document library</button>
-      <button onClick={run} disabled={loading || runtime?.aiEnabled === false} title={runtime?.aiEnabled === false ? 'AI is disabled to prevent usage charges.' : ''} style={{ ...button, background: runtime?.aiEnabled === false ? '#475569' : '#4f46e5', color: 'white', cursor: runtime?.aiEnabled === false ? 'not-allowed' : 'pointer' }}>{runtime?.aiEnabled === false ? 'AI disabled — cost control' : loading ? (progress || 'Comparing proposal to sources…') : review ? 'Re-run structured comparison' : 'Run structured standards comparison'}</button>
+      <button onClick={() => nav(`/proposal/${id}/ai-review`)} title="All AI actions run from one place." style={{ ...button, background: '#4f46e5', color: 'white' }}>✦ AI Review Center</button>
     </header>
     <main style={{ maxWidth: 1400, margin: '0 auto', padding: 26 }}>
       {error && <div style={{ padding: 14, background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', borderRadius: 10, marginBottom: 16 }}>{error}</div>}
       {runtime?.aiEnabled === false && <div style={{ padding: 14, background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', borderRadius: 10, marginBottom: 16 }}>AI comparisons are intentionally disabled so this environment cannot generate API charges. The source catalog and link-health monitoring remain available.</div>}
       {sourceStatus && <SourceStatus status={sourceStatus} onOpenLibrary={() => nav('/standards')} />}
-      {!review && <div style={{ ...card, marginTop: 16 }}><h2>Structured comparison</h2><p style={{ color: '#64748b' }}>This control resolves the proposal state and city, reviews applicable state sources first, then reviews only that city’s sources. Other cities, counties, districts, and unrelated publishers are excluded before AI analysis.</p>{loading && <div style={{ marginTop: 12, color: '#4f46e5', fontWeight: 750 }}>⟳ {progress}</div>}</div>}
+      {!review && <div style={{ ...card, marginTop: 16 }}><h2>Structured comparison</h2><p style={{ color: '#64748b' }}>Start this comparison from the AI Review Center. It resolves the proposal state and city, reviews applicable state sources first, then reviews only that city’s sources. Other cities, counties, districts, and unrelated publishers are excluded before AI analysis.</p>{loading && <div style={{ marginTop: 12, color: '#4f46e5', fontWeight: 750 }}>⟳ {progress}</div>}</div>}
       {review && <>
         <div style={{ display: 'grid', gridTemplateColumns: '2fr repeat(3,1fr)', gap: 12, marginBottom: 16 }}>
           <div style={card}><div style={label}>Detected scope</div><div style={{ fontWeight: 700, marginTop: 8 }}>{review.projectScope.join(', ') || 'Not identified'}</div><div style={{ fontSize: 12, color: '#64748b', marginTop: 7 }}>{review.jurisdiction.city || ''} {review.jurisdiction.state || ''} · confidence {Math.round(review.jurisdiction.confidence * 100)}%</div></div>
