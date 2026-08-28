@@ -236,7 +236,9 @@ export default function AiReview() {
       <PageTracker job={jobs.document_review} review={results.document_review} limits={runtime?.aiReviewLimits} />
       <SourceSummary sources={sources} />
       <Results results={results} />
+      <DocumentReviewDetails review={results.document_review} />
       <StandardsComparison review={results.standards_comparison} />
+      <DiagramAnalysisDetails analysis={results.diagram_analysis} />
     </main>
   </div>
 }
@@ -329,6 +331,53 @@ function Results({ results }) {
   </section>
 }
 
+function DocumentReviewDetails({ review }) {
+  if (!review) return null
+  const pages = review.pageReviews || []
+  return <section id="document-review-results" style={{ ...card, marginTop: 16, padding: 0, overflow: 'hidden' }}>
+    <div style={{ padding: 18, borderBottom: '1px solid #e2e8f0' }}>
+      <div style={eyebrow}>Run AI API results</div>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginTop: 6, flexWrap: 'wrap' }}>
+        <div>
+          <h2 style={{ fontSize: 20, marginBottom: 5 }}>Page-by-page document findings</h2>
+          <div style={{ color: '#64748b', fontSize: 12 }}>
+            {review.reviewedPages || pages.length} pages reviewed in batches of {review.batchSize || 3}
+            {review.usage?.totalTokens ? ` · ${review.usage.totalTokens.toLocaleString()} tokens used` : ''}
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Count label="Needs updates" value={review.counts?.red || 0} color="#dc2626" />
+          <Count label="Needs review" value={review.counts?.yellow || 0} color="#a16207" />
+          <Count label="No concern" value={review.counts?.green || 0} color="#15803d" />
+        </div>
+      </div>
+      {review.stoppedReason && <div style={{ ...warningStyle, margin: '14px 0 0' }}>{review.stoppedReason} The findings completed before the stop were saved below.</div>}
+    </div>
+    <div style={{ padding: 18 }}>
+      {pages.length ? pages.map(page => <details key={page.pageNumber} open={page.score !== 'green'} style={detailCard(page.score)}>
+        <summary style={detailSummary}>
+          <span style={scoreDot(page.score)} />
+          <span style={{ fontWeight: 850 }}>Page {page.pageNumber}</span>
+          <span style={scorePill(page.score)}>{scoreLabels[page.score] || 'Needs review'}</span>
+          <span style={{ color: '#64748b', fontSize: 12, fontWeight: 500, flex: 1 }}>{page.summary}</span>
+          <span style={{ color: '#94a3b8', fontSize: 11 }}>{page.findings?.length || 0} finding{page.findings?.length === 1 ? '' : 's'} ▾</span>
+        </summary>
+        <div style={{ padding: '0 14px 14px' }}>
+          {page.findings?.length ? page.findings.map((finding, index) => <div key={`${finding.category}-${index}`} style={{ padding: '12px 13px', background: 'white', border: '1px solid #e2e8f0', borderRadius: 9, marginTop: 9 }}>
+            <div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', marginBottom: 7 }}>
+              <span style={severityPill(finding.severity)}>{humanize(finding.severity)}</span>
+              <span style={{ fontSize: 10, color: '#475569', fontWeight: 800, textTransform: 'uppercase' }}>{humanize(finding.category)}</span>
+            </div>
+            <div style={{ fontSize: 13, color: '#1e293b', fontWeight: 750, lineHeight: 1.5 }}>{finding.finding}</div>
+            <Evidence label="Proposal evidence" text={finding.evidence} />
+            <Evidence label="Recommended action" text={finding.recommendation} color="#6d28d9" />
+          </div>) : <div style={{ color: '#64748b', fontSize: 12, paddingTop: 10 }}>No specific findings were returned for this page.</div>}
+        </div>
+      </details>) : <div style={{ color: '#64748b' }}>No page-level findings were returned. Run the document review again to create the detailed page record.</div>}
+    </div>
+  </section>
+}
+
 function StandardsComparison({ review }) {
   if (!review) return null
   const matrix = review.matrix || []
@@ -370,6 +419,68 @@ function StandardsComparison({ review }) {
   </section>
 }
 
+function DiagramAnalysisDetails({ analysis }) {
+  if (!analysis) return null
+  const diagrams = analysis.diagrams || []
+  const overall = analysis.overallCompliance || 'yellow'
+  return <section id="diagram-analysis-results" style={{ ...card, marginTop: 16, padding: 0, overflow: 'hidden' }}>
+    <div style={{ padding: 18, borderBottom: '1px solid #e2e8f0' }}>
+      <div style={eyebrow}>Diagram analysis results</div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginTop: 6, flexWrap: 'wrap' }}>
+        <div style={{ maxWidth: 760 }}>
+          <h2 style={{ fontSize: 20, marginBottom: 7 }}>Plans, details, tables, and diagrams</h2>
+          <p style={{ color: '#475569', fontSize: 13, lineHeight: 1.6 }}>{analysis.summary || 'No overall summary was returned.'}</p>
+        </div>
+        <span style={{ ...scorePill(overall), fontSize: 11, padding: '7px 11px' }}>{diagramScoreLabels[overall] || 'Needs review'}</span>
+      </div>
+    </div>
+
+    <div style={{ padding: 18 }}>
+      {analysis.criticalIssues?.length > 0 && <FindingList title="Critical issues" items={analysis.criticalIssues} color="#dc2626" background="#fef2f2" border="#fecaca" />}
+      {analysis.recommendations?.length > 0 && <FindingList title="Recommendations" items={analysis.recommendations} color="#6d28d9" background="#f5f3ff" border="#ddd6fe" />}
+
+      <div style={{ ...eyebrow, margin: '18px 0 9px' }}>Diagram findings ({diagrams.length})</div>
+      {diagrams.length ? diagrams.map((diagram, index) => <details key={`${diagram.location}-${diagram.type}-${index}`} open={diagram.compliance !== 'green'} style={detailCard(diagram.compliance)}>
+        <summary style={detailSummary}>
+          <span style={scoreDot(diagram.compliance)} />
+          <span style={{ fontWeight: 850 }}>{diagram.type || `Diagram ${index + 1}`}</span>
+          <span style={scorePill(diagram.compliance)}>{diagramScoreLabels[diagram.compliance] || 'Needs review'}</span>
+          <span style={{ color: '#64748b', fontSize: 12, flex: 1 }}>{diagram.location || 'Location not identified'}</span>
+          <span style={{ color: '#94a3b8', fontSize: 11 }}>details ▾</span>
+        </summary>
+        <div style={{ padding: '0 14px 14px' }}>
+          <p style={{ fontSize: 13, color: '#334155', lineHeight: 1.6, margin: '10px 0' }}>{diagram.description}</p>
+          {diagram.concerns?.length > 0 && <FindingList title="Concerns" items={diagram.concerns} color="#dc2626" background="#fef2f2" border="#fecaca" compact />}
+          {diagram.missingElements?.length > 0 && <FindingList title="Missing elements" items={diagram.missingElements} color="#a16207" background="#fffbeb" border="#fde68a" compact />}
+          {diagram.positives?.length > 0 && <FindingList title="Positive findings" items={diagram.positives} color="#15803d" background="#f0fdf4" border="#bbf7d0" compact />}
+          {diagram.codes?.length > 0 && <div style={{ marginTop: 12 }}><div style={{ ...eyebrow, marginBottom: 6 }}>Codes and standards referenced</div><div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{diagram.codes.map((code, codeIndex) => <span key={`${code}-${codeIndex}`} style={{ padding: '5px 8px', borderRadius: 6, background: '#eef2ff', color: '#4338ca', border: '1px solid #c7d2fe', fontSize: 11, fontWeight: 700 }}>{code}</span>)}</div></div>}
+        </div>
+      </details>) : <div style={{ color: '#64748b', fontSize: 12 }}>No individual diagrams were returned.</div>}
+
+      {analysis.researchFindings?.length > 0 && <div style={{ marginTop: 20 }}>
+        <div style={{ ...eyebrow, marginBottom: 9 }}>Location research and sources</div>
+        {analysis.researchFindings.map((finding, index) => <div key={`${finding.sourceUrl}-${index}`} style={{ padding: '11px 13px', border: '1px solid #c7d2fe', background: '#eef2ff', borderRadius: 9, marginBottom: 8 }}>
+          <div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap' }}><b style={{ fontSize: 12, color: '#3730a3' }}>{humanize(finding.category)}</b><span style={{ fontSize: 10, color: '#6366f1', textTransform: 'uppercase', fontWeight: 800 }}>{finding.confidence} confidence</span></div>
+          <div style={{ color: '#334155', fontSize: 12.5, lineHeight: 1.55, marginTop: 5 }}>{finding.finding}</div>
+          <a href={finding.sourceUrl} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 6, color: '#4338ca', fontSize: 11.5, fontWeight: 800 }}>{finding.sourceTitle || 'Open verified source'} ↗</a>
+        </div>)}
+      </div>}
+    </div>
+  </section>
+}
+
+function FindingList({ title, items, color, background, border, compact = false }) {
+  return <div style={{ marginBottom: compact ? 10 : 16 }}>
+    <div style={{ ...eyebrow, color, marginBottom: 7 }}>{title}</div>
+    {items.map((item, index) => <div key={`${item}-${index}`} style={{ padding: compact ? '7px 10px' : '9px 12px', background, border: `1px solid ${border}`, color, borderRadius: 8, fontSize: 12.5, lineHeight: 1.5, marginBottom: 6 }}>• {item}</div>)}
+  </div>
+}
+
+function Evidence({ label, text, color = '#475569' }) {
+  if (!text) return null
+  return <div style={{ marginTop: 8, fontSize: 12, color, lineHeight: 1.5 }}><b>{label}:</b> {text}</div>
+}
+
 function Count({ label, value, color }) {
   return <div style={{ minWidth: 76, padding: '8px 10px', borderRadius: 9, background: `${color}10`, border: `1px solid ${color}30`, textAlign: 'center' }}>
     <div style={{ fontSize: 9, color, fontWeight: 850, textTransform: 'uppercase' }}>{label}</div>
@@ -391,3 +502,15 @@ const comparisonColors = { pass: '#15803d', fail: '#dc2626', review: '#a16207' }
 const comparisonPill = result => ({ padding: '4px 8px', borderRadius: 20, fontWeight: 850, color: comparisonColors[result] || comparisonColors.review, background: `${comparisonColors[result] || comparisonColors.review}14` })
 const tableHead = { textAlign: 'left', padding: 12, background: '#f8fafc', borderBottom: '1px solid #cbd5e1', color: '#475569', whiteSpace: 'nowrap' }
 const tableCell = { padding: 12, borderBottom: '1px solid #e2e8f0', verticalAlign: 'top', minWidth: 110, lineHeight: 1.45 }
+const scoreLabels = { green: 'No concern', yellow: 'Needs review', red: 'Needs updates' }
+const diagramScoreLabels = { green: 'Compliant', yellow: 'Needs review', red: 'Issues found' }
+const scorePalette = { green: { color: '#15803d', bg: '#f0fdf4', border: '#bbf7d0' }, yellow: { color: '#a16207', bg: '#fffbeb', border: '#fde68a' }, red: { color: '#dc2626', bg: '#fef2f2', border: '#fecaca' } }
+const detailCard = score => ({ border: `1px solid ${(scorePalette[score] || scorePalette.yellow).border}`, background: (scorePalette[score] || scorePalette.yellow).bg, borderRadius: 10, marginBottom: 9, overflow: 'hidden' })
+const detailSummary = { display: 'flex', alignItems: 'center', gap: 9, padding: '12px 14px', cursor: 'pointer', listStyle: 'none' }
+const scoreDot = score => ({ width: 9, height: 9, borderRadius: '50%', background: (scorePalette[score] || scorePalette.yellow).color, flexShrink: 0 })
+const scorePill = score => ({ padding: '4px 8px', borderRadius: 20, fontSize: 9.5, fontWeight: 850, textTransform: 'uppercase', whiteSpace: 'nowrap', color: (scorePalette[score] || scorePalette.yellow).color, background: 'white', border: `1px solid ${(scorePalette[score] || scorePalette.yellow).border}` })
+const severityPill = severity => {
+  const palette = severity === 'critical' ? scorePalette.red : severity === 'review' ? scorePalette.yellow : { color: '#475569', bg: '#f8fafc', border: '#cbd5e1' }
+  return { padding: '3px 7px', borderRadius: 20, fontSize: 9, fontWeight: 850, color: palette.color, background: palette.bg, border: `1px solid ${palette.border}`, textTransform: 'uppercase' }
+}
+const humanize = value => String(value || '').replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase())
