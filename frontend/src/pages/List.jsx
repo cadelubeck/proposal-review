@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth, useApiFetch } from '../context/AuthContext'
+import Icon from '../components/Icon'
 
-const SC = { pending:'#6b7280', in_review:'#3b82f6', needs_updates:'#f59e0b', accepted:'#22c55e', rejected:'#ef4444' }
+const SC = { pending:'#66717d', in_review:'#087d73', needs_updates:'#94570e', accepted:'#177055', rejected:'#b43c38' }
 const SL = { pending:'Pending', in_review:'In Review', needs_updates:'Needs Updates', accepted:'Accepted', rejected:'Rejected' }
+const STATUS_TONE = { pending:'', in_review:'teal', needs_updates:'amber', accepted:'green', rejected:'red' }
 
 function relTime(iso) {
   const d = Math.floor((Date.now() - new Date(iso)) / 1000)
@@ -30,6 +32,8 @@ export default function List() {
   const [uploading, setUploading] = useState(false)
   const [sourceAlerts, setSourceAlerts] = useState(0)
   const fileRef = useRef()
+  const dialogRef = useRef()
+  const openerRef = useRef()
 
   const load = async () => {
     const p = new URLSearchParams()
@@ -86,335 +90,106 @@ export default function List() {
   const totalCount = proposals.length
   const locCount = Object.keys(grouped).length
 
+  const openUpload = () => { openerRef.current = document.activeElement; setShowUpload(true) }
+  const closeUpload = () => { setShowUpload(false); requestAnimationFrame(() => openerRef.current?.focus()) }
+  useEffect(() => {
+    if (!showUpload) return
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    dialogRef.current?.querySelector('input')?.focus()
+    const onKeyDown = event => {
+      if (event.key === 'Escape') closeUpload()
+      if (event.key !== 'Tab') return
+      const focusable = [...dialogRef.current.querySelectorAll('button, input, textarea, [tabindex]:not([tabindex="-1"])')].filter(element => !element.disabled && element.offsetParent !== null)
+      if (!focusable.length) return
+      const first = focusable[0]; const last = focusable.at(-1)
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.body.style.overflow = previousOverflow; document.removeEventListener('keydown', onKeyDown) }
+  }, [showUpload])
+
+
   return (
-    <div style={{ minHeight: '100vh', background: '#f1f5f9' }}>
-
-      {/* ── Header ── */}
-      <header style={{
-        background: '#0f172a',
-        padding: '0 24px',
-        height: 60,
-        display: 'flex', alignItems: 'center', gap: 14,
-        position: 'sticky', top: 0, zIndex: 50,
-        boxShadow: '0 1px 0 rgba(255,255,255,0.05), 0 4px 20px rgba(0,0,0,0.4)'
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginRight: 8, flexShrink: 0 }}>
-          <div style={{
-            width: 32, height: 32, borderRadius: 9,
-            background: 'linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16
-          }}>🏛</div>
-          <div>
-            <div style={{ fontWeight: 800, fontSize: 14, color: '#fff', letterSpacing: -0.4, lineHeight: 1.2 }}>City Form Reviewer</div>
-            <div style={{ fontSize: 9, color: '#818cf8', fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase' }}>{user?.companyName || 'AI Compliance Review'}</div>
-          </div>
-        </div>
-
-        <div style={{ flex: 1, position: 'relative' }}>
-          <span style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: '#475569', pointerEvents: 'none' }}>⌕</span>
-          <input value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="Search contracts, clients, locations…"
-            style={{
-              width: '100%', padding: '9px 14px 9px 32px',
-              borderRadius: 8, border: '1px solid rgba(255,255,255,0.08)',
-              fontSize: 13, background: 'rgba(255,255,255,0.07)', color: '#fff',
-              outline: 'none', transition: 'all 0.15s'
-            }}
-            onFocus={e => { e.target.style.background = 'rgba(255,255,255,0.11)'; e.target.style.borderColor = 'rgba(99,102,241,0.6)' }}
-            onBlur={e => { e.target.style.background = 'rgba(255,255,255,0.07)'; e.target.style.borderColor = 'rgba(255,255,255,0.08)' }} />
-        </div>
-
-        <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}
-          style={{
-            padding: '8px 12px', borderRadius: 8, outline: 'none', cursor: 'pointer',
-            border: '1px solid rgba(255,255,255,0.08)',
-            fontSize: 12, fontWeight: 600,
-            background: 'rgba(255,255,255,0.07)', color: '#cbd5e1'
-          }}>
-          <option value="" style={{ background: '#1e293b' }}>All Statuses</option>
-          {Object.entries(SL).map(([v, l]) => <option key={v} value={v} style={{ background: '#1e293b' }}>{l}</option>)}
-        </select>
-
-        <button onClick={() => nav('/my-work')}
-          style={{ padding: '9px 16px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer', background: 'rgba(255,255,255,0.07)', color: '#cbd5e1', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: 6 }}
-          onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.13)'; e.currentTarget.style.color = 'white' }}
-          onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.07)'; e.currentTarget.style.color = '#cbd5e1' }}>
-          📋 My Work
-        </button>
-
-        <button onClick={() => nav('/standards')}
-          style={{ padding: '9px 16px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer', background: 'rgba(255,255,255,0.07)', color: '#cbd5e1', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>
-          📚 Standards
-        </button>
-
-        {['manager', 'admin'].includes(user?.role) && <button onClick={() => nav('/admin/sources')}
-          style={{ padding: '9px 13px', borderRadius: 8, border: `1px solid ${sourceAlerts ? 'rgba(251,191,36,.5)' : 'rgba(255,255,255,0.1)'}`, cursor: 'pointer', background: sourceAlerts ? 'rgba(245,158,11,.12)' : 'rgba(255,255,255,0.07)', color: sourceAlerts ? '#fbbf24' : '#cbd5e1', fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap' }}>
-          ⚠ Sources{sourceAlerts ? ` (${sourceAlerts})` : ''}
-        </button>}
-
-        <button onClick={() => nav('/dashboard')}
-          style={{ padding: '9px 16px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer', background: 'rgba(255,255,255,0.07)', color: '#cbd5e1', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', transition: 'all 0.15s', display: 'flex', alignItems: 'center', gap: 6 }}
-          onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.13)'; e.currentTarget.style.color = 'white' }}
-          onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.07)'; e.currentTarget.style.color = '#cbd5e1' }}>
-          📊 Dashboard
-        </button>
-
-        <button onClick={() => nav('/profile')}
-          style={{ padding: '9px 16px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', cursor: 'pointer', background: 'rgba(255,255,255,0.07)', color: '#cbd5e1', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap' }}>
-          👤 Profile
-        </button>
-
-        <button onClick={() => setShowUpload(true)}
-          style={{ padding: '9px 18px', borderRadius: 8, border: 'none', cursor: 'pointer', background: 'linear-gradient(135deg, #4f46e5, #6366f1)', color: 'white', fontSize: 13, fontWeight: 700, whiteSpace: 'nowrap', boxShadow: '0 2px 10px rgba(79,70,229,0.5)', transition: 'all 0.15s' }}
-          onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = '0 4px 16px rgba(79,70,229,0.6)' }}
-          onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = '0 2px 10px rgba(79,70,229,0.5)' }}>
-          + New Contract
-        </button>
-
-        <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.1)' }} />
-
-        {/* User avatar + logout */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-          <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'linear-gradient(135deg, #6366f1, #818cf8)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 13, color: 'white', flexShrink: 0, cursor: 'pointer' }}
-            onClick={() => nav('/profile')} title={`${user?.name} — view profile`}>
-            {user?.name?.charAt(0)?.toUpperCase()}
-          </div>
-          <button onClick={() => { logout(); nav('/login') }}
-            style={{ background: 'none', border: 'none', color: '#475569', cursor: 'pointer', fontSize: 11, fontWeight: 600, padding: '4px 6px', borderRadius: 6, transition: 'color 0.12s' }}
-            onMouseEnter={e => e.currentTarget.style.color = '#fca5a5'}
-            onMouseLeave={e => e.currentTarget.style.color = '#475569'}>
-            Sign out
-          </button>
-        </div>
+    <div className="civic-page">
+      <header className="civic-header civic-list-header">
+        <div className="civic-brand"><span className="civic-brand-mark"><Icon name="civic" size={18} /></span><span>City Form Reviewer</span></div>
+        <nav className="civic-list-nav" aria-label="Main navigation">
+          <button className="civic-btn" onClick={() => nav('/my-work')}><Icon name="work" size={16} /> My Work</button>
+          <button className="civic-btn" onClick={() => nav('/standards')}><Icon name="book" size={16} /> Standards</button>
+          {['manager', 'admin'].includes(user?.role) && <button className="civic-btn" onClick={() => nav('/admin/sources')}><Icon name="alert" size={16} /> Sources{sourceAlerts ? ' (' + sourceAlerts + ')' : ''}</button>}
+          <button className="civic-btn" onClick={() => nav('/dashboard')}><Icon name="grid" size={16} /> Dashboard</button>
+          <button className="civic-btn" onClick={() => nav('/profile')}><Icon name="user" size={16} /> Profile</button>
+          <button className="civic-btn civic-btn-primary" onClick={openUpload}><Icon name="plus" size={16} /> New Contract</button>
+          <button className="civic-btn" onClick={() => { logout(); nav('/login') }}><Icon name="logout" size={16} /> Sign out</button>
+        </nav>
       </header>
 
-      {/* ── Content ── */}
-      <div style={{ maxWidth: 880, margin: '0 auto', padding: '32px 24px' }}>
+      <main className="civic-list-main">
+        <div className="civic-list-intro">
+          <div><div className="civic-eyebrow">{user?.companyName || 'Review workspace'}</div><h1 className="civic-title">Contracts &amp; proposals</h1><p>Open a proposal to review its document, standards, and diagram findings.</p></div>
+          <button className="civic-btn" onClick={openUpload}><Icon name="plus" size={16} /> Upload contract</button>
+        </div>
+        <div className="civic-counts"><span className="civic-pill">{totalCount} contracts</span><span className="civic-pill">{locCount} locations</span></div>
+        <div className="civic-filters">
+          <label className="sr-only" htmlFor="proposal-search">Search contracts</label>
+          <input id="proposal-search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search contracts, clients, locations…" />
+          <label className="sr-only" htmlFor="proposal-status">Filter by status</label>
+          <select id="proposal-status" value={filterStatus} onChange={event => setFilterStatus(event.target.value)}>
+            <option value="">All statuses</option>
+            {Object.entries(SL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </div>
 
-        <section style={{ background: 'linear-gradient(135deg,#312e81,#4f46e5)', borderRadius: 20, padding: '30px 32px', marginBottom: 28, color: 'white', boxShadow: '0 14px 35px rgba(79,70,229,.22)', display: 'flex', alignItems: 'center', gap: 24 }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 11, color: '#c7d2fe', textTransform: 'uppercase', letterSpacing: 1.1, fontWeight: 800, marginBottom: 9 }}>Start a compliance review</div>
-            <h1 style={{ fontSize: 25, lineHeight: 1.18, letterSpacing: -.6, marginBottom: 9 }}>Upload a contract. Get a clear, sourced risk review.</h1>
-            <p style={{ fontSize: 13, lineHeight: 1.6, color: '#e0e7ff', maxWidth: 580 }}>AI breaks the document into reviewable requirements, checks each item against city standards and supporting reports, and shows what passed, what failed, and what needs an engineer’s decision.</p>
+        {totalCount === 0 && <div className="civic-card" style={{ padding:40, textAlign:'center' }}>
+          <Icon name="file" size={32} style={{ color:'var(--teal)', marginBottom:12 }} />
+          <h2 className="civic-section-title">{search || filterStatus ? 'No matching contracts' : 'No contracts yet'}</h2>
+          <p className="civic-muted" style={{ fontSize:13, margin:'8px 0 18px' }}>{search || filterStatus ? 'Try another search or status.' : 'Upload your first contract to start a review.'}</p>
+          {!search && !filterStatus && <button className="civic-btn civic-btn-primary" onClick={openUpload}>Upload first contract</button>}
+        </div>}
+
+        {Object.entries(grouped).map(([location, items], index) => <section className="civic-location" key={location}>
+          <button aria-expanded={expanded[location] !== false} aria-controls={'location-' + index} onClick={() => setExpanded(current => ({ ...current, [location]: !current[location] }))}>
+            <Icon name="chevron" size={17} style={{ transform:expanded[location] === false ? 'rotate(-90deg)' : undefined }} />
+            <Icon name="pin" size={17} style={{ color:'var(--teal)' }} />
+            {location}<span className="civic-pill location-count">{items.length}</span>
+          </button>
+          {expanded[location] !== false && <div id={'location-' + index} className="civic-proposal-table">
+            {items.map(proposal => <div className="civic-proposal-row" key={proposal.id}>
+              <div><button className="civic-proposal-link" onClick={() => nav('/proposal/' + proposal.id)}>{proposal.name}</button><span className="meta">{proposal.company || 'Client not set'}</span></div>
+              <span className="date civic-muted" style={{ fontSize:12 }}>{relTime(proposal.updated_at)}</span>
+              <span><span className={'civic-pill ' + (STATUS_TONE[proposal.status] || '')}>{SL[proposal.status] || proposal.status}</span></span>
+              <button className="civic-btn civic-icon-btn civic-btn-danger" onClick={event => deleteProposal(event, proposal.id)} title={'Delete ' + proposal.name} aria-label={'Delete ' + proposal.name}><Icon name="trash" size={16} /></button>
+            </div>)}
+          </div>}
+        </section>)}
+      </main>
+
+      {showUpload && <div className="civic-dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) closeUpload() }}>
+        <div ref={dialogRef} className="civic-dialog civic-card" role="dialog" aria-modal="true" aria-labelledby="upload-title">
+          <div style={{ display:'flex', alignItems:'start', justifyContent:'space-between', gap:12 }}>
+            <div><div className="civic-eyebrow">New review</div><h2 id="upload-title" className="civic-section-title" style={{ marginTop:5 }}>Upload a contract</h2><p className="civic-muted" style={{ fontSize:12, marginTop:6 }}>Add a PDF, text file, or pasted proposal text.</p></div>
+            <button className="civic-btn civic-icon-btn" onClick={closeUpload} title="Close upload dialog" aria-label="Close upload dialog"><Icon name="x" size={17} /></button>
           </div>
-          <button onClick={() => setShowUpload(true)} style={{ padding: '13px 19px', borderRadius: 10, border: 'none', background: 'white', color: '#4338ca', fontSize: 13, fontWeight: 800, cursor: 'pointer', whiteSpace: 'nowrap', boxShadow: '0 5px 18px rgba(15,23,42,.2)' }}>＋ Upload contract</button>
-        </section>
-
-        {/* Stats */}
-        {totalCount > 0 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 28, fontSize: 13, color: '#64748b' }}>
-            <span style={{ fontWeight: 700, color: '#1e293b' }}>{totalCount}</span> contract{totalCount !== 1 ? 's' : ''}
-            <span style={{ color: '#cbd5e1' }}>·</span>
-            <span style={{ fontWeight: 700, color: '#1e293b' }}>{locCount}</span> location{locCount !== 1 ? 's' : ''}
-            {filterStatus && (
-              <>
-                <span style={{ color: '#cbd5e1' }}>·</span>
-                <span style={{ padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 700,
-                  background: SC[filterStatus] + '18', color: SC[filterStatus], border: `1px solid ${SC[filterStatus]}28` }}>
-                  {SL[filterStatus]}
-                </span>
-                <button onClick={() => setFilterStatus('')}
-                  style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 12, padding: 0 }}>
-                  × clear
-                </button>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* Empty state */}
-        {totalCount === 0 && (
-          <div style={{ textAlign: 'center', padding: '90px 20px' }}>
-            <div style={{ fontSize: 52, marginBottom: 18, filter: 'grayscale(0.2)' }}>🏛</div>
-            <div style={{ fontSize: 20, fontWeight: 800, color: '#1e293b', letterSpacing: -0.4, marginBottom: 8 }}>
-              {search ? `No results for "${search}"` : 'No contracts yet'}
-            </div>
-            <div style={{ fontSize: 14, color: '#64748b', marginBottom: 28, maxWidth: 340, margin: '0 auto 28px' }}>
-              {search ? 'Try a different search term or clear your filter.'
-                : 'Upload your first contract to start an AI-powered municipal compliance review.'}
-            </div>
-            {!search && (
-              <button onClick={() => setShowUpload(true)}
-                style={{
-                  padding: '11px 28px', borderRadius: 10, border: 'none', cursor: 'pointer',
-                  background: 'linear-gradient(135deg, #4f46e5, #6366f1)',
-                  color: 'white', fontSize: 14, fontWeight: 700,
-                  boxShadow: '0 4px 16px rgba(79,70,229,0.4)'
-                }}>
-                Upload First Contract
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Groups */}
-        {Object.entries(grouped).map(([location, items]) => (
-          <div key={location} style={{ marginBottom: 28 }}>
-            <div onClick={() => setExpanded(e => ({ ...e, [location]: !e[location] }))}
-              style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', marginBottom: 12, userSelect: 'none' }}>
-              <div style={{
-                width: 24, height: 24, borderRadius: 6, flexShrink: 0,
-                background: 'white', border: '1.5px solid #e2e8f0',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 10, color: '#475569'
-              }}>
-                {expanded[location] !== false ? '▾' : '▸'}
-              </div>
-              <span style={{ fontSize: 12.5, color: '#475569' }}>📍</span>
-              <span style={{ fontWeight: 700, fontSize: 14, color: '#1e293b' }}>{location}</span>
-              <span style={{ fontSize: 11, padding: '1px 8px', borderRadius: 20, background: '#e2e8f0', color: '#475569', fontWeight: 700 }}>
-                {items.length}
-              </span>
-              <div style={{ flex: 1, height: 1, background: '#e2e8f0' }} />
-            </div>
-
-            {expanded[location] !== false && (
-              <div style={{ paddingLeft: 34, display: 'flex', flexDirection: 'column', gap: 5 }}>
-                {items.map(p => (
-                  <div key={p.id} onClick={() => nav(`/proposal/${p.id}`)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 14,
-                      padding: '13px 16px', background: 'white', borderRadius: 11,
-                      cursor: 'pointer', border: '1px solid #f1f5f9',
-                      boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
-                      transition: 'all 0.15s ease'
-                    }}
-                    onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 4px 18px rgba(0,0,0,0.1)'; e.currentTarget.style.transform = 'translateY(-1px)' }}
-                    onMouseLeave={e => { e.currentTarget.style.boxShadow = '0 1px 4px rgba(0,0,0,0.06)'; e.currentTarget.style.transform = 'none' }}>
-
-                    <div style={{
-                      width: 38, height: 38, borderRadius: 10, flexShrink: 0,
-                      background: 'linear-gradient(135deg, #eef2ff, #e0e7ff)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18
-                    }}>📄</div>
-
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 700, fontSize: 14, color: '#0f172a', marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {p.name}
-                      </div>
-                      <div style={{ fontSize: 12, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 5 }}>
-                        {p.company && <span style={{ color: '#64748b', fontWeight: 500 }}>{p.company}</span>}
-                        {p.company && <span>·</span>}
-                        <span>{relTime(p.updated_at)}</span>
-                      </div>
-                    </div>
-
-                    <span style={{
-                      padding: '4px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700,
-                      background: (SC[p.status] || '#6b7280') + '15',
-                      color: SC[p.status] || '#6b7280',
-                      border: `1px solid ${(SC[p.status] || '#6b7280')}22`,
-                      whiteSpace: 'nowrap'
-                    }}>
-                      {SL[p.status] || p.status}
-                    </span>
-
-                    <button onClick={e => deleteProposal(e, p.id)}
-                      style={{ background: 'none', border: 'none', color: '#d1d5db', cursor: 'pointer', fontSize: 20, lineHeight: 1, borderRadius: 5, padding: '0 4px', transition: 'color 0.12s' }}
-                      onMouseEnter={e => e.currentTarget.style.color = '#f87171'}
-                      onMouseLeave={e => e.currentTarget.style.color = '#d1d5db'}
-                      title="Delete">×</button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {/* ── Upload Modal ── */}
-      {showUpload && (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 100,
-          background: 'rgba(15,23,42,0.75)', backdropFilter: 'blur(6px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20
-        }}
-          onClick={e => e.target === e.currentTarget && setShowUpload(false)}>
-          <div className="fade-in" style={{
-            background: 'white', borderRadius: 18, padding: '32px 32px 28px',
-            width: '100%', maxWidth: 460, maxHeight: '92vh', overflow: 'auto',
-            boxShadow: '0 30px 90px rgba(0,0,0,0.35)'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 26 }}>
-              <div>
-                <div style={{ fontSize: 19, fontWeight: 800, color: '#0f172a', letterSpacing: -0.5 }}>New Contract Review</div>
-                <div style={{ fontSize: 13, color: '#64748b', marginTop: 3 }}>AI will extract requirements, risks, passes, and source references</div>
-              </div>
-              <button onClick={() => setShowUpload(false)}
-                style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 22, lineHeight: 1, padding: '2px 6px', borderRadius: 6, marginTop: -2, transition: 'all 0.12s' }}
-                onMouseEnter={e => { e.currentTarget.style.background = '#f1f5f9'; e.currentTarget.style.color = '#374151' }}
-                onMouseLeave={e => { e.currentTarget.style.background = 'none'; e.currentTarget.style.color = '#94a3b8' }}>×</button>
-            </div>
-
-            {[['Contract / Project Name', 'name', 'e.g. Oak Ridge Infrastructure Contract', true],
-              ['Client', 'company', 'Select or enter a new client', false],
-              ['Location / Jurisdiction', 'location', 'e.g. Denver, CO', false]
-            ].map(([label, key, ph, req]) => (
-              <div key={key} style={{ marginBottom: 14 }}>
-                <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: '#374151', marginBottom: 5, textTransform: 'uppercase', letterSpacing: 0.6 }}>
-                  {label}{req && <span style={{ color: '#ef4444', marginLeft: 3 }}>*</span>}
-                </label>
-                <input value={form[key]} list={key === 'company' ? 'client-options' : undefined} onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))} placeholder={ph}
-                  style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #e2e8f0', borderRadius: 8, fontSize: 14, outline: 'none', transition: 'border-color 0.15s', background: '#fafafa', color: '#0f172a' }}
-                  onFocus={e => e.target.style.borderColor = '#6366f1'}
-                  onBlur={e => e.target.style.borderColor = '#e2e8f0'} />
-              </div>
-            ))}
-            <datalist id="client-options">{clients.map(client => <option key={client} value={client} />)}</datalist>
-            <div style={{ fontSize: 11, color: '#64748b', marginTop: -8, marginBottom: 16 }}>Choose an existing client or type a name to add one.</div>
-
-            <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: '#374151', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.6 }}>Document</label>
-
-            <div onClick={() => fileRef.current?.click()}
-              style={{
-                border: `2px dashed ${file ? '#22c55e' : '#d1d5db'}`,
-                borderRadius: 10, padding: '22px 20px', textAlign: 'center',
-                marginBottom: 14, cursor: 'pointer', transition: 'all 0.15s',
-                background: file ? '#f0fdf4' : '#fafafa'
-              }}
-              onMouseEnter={e => { if (!file) { e.currentTarget.style.borderColor = '#6366f1'; e.currentTarget.style.background = '#f5f3ff' } }}
-              onMouseLeave={e => { if (!file) { e.currentTarget.style.borderColor = '#d1d5db'; e.currentTarget.style.background = '#fafafa' } }}>
-              <input ref={fileRef} type="file" accept=".pdf,.txt" onChange={e => { setFile(e.target.files[0]); setPasteText('') }} style={{ display: 'none' }} />
-              <div style={{ fontSize: 26, marginBottom: 6 }}>{file ? '✅' : '📎'}</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: file ? '#16a34a' : '#374151', marginBottom: 2 }}>
-                {file ? file.name : 'Click to upload PDF or TXT'}
-              </div>
-              <div style={{ fontSize: 11, color: '#94a3b8' }}>{file ? 'Click to change file' : 'PDF or plain text, up to 50 MB'}</div>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
-              <div style={{ flex: 1, height: 1, background: '#e2e8f0' }} />
-              <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>or paste text</span>
-              <div style={{ flex: 1, height: 1, background: '#e2e8f0' }} />
-            </div>
-
-            <textarea value={pasteText} onChange={e => { setPasteText(e.target.value); setFile(null) }}
-              placeholder="Paste proposal text here…"
-              style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #e2e8f0', borderRadius: 8, height: 96, resize: 'vertical', fontSize: 13, marginBottom: 24, outline: 'none', transition: 'border-color 0.15s', fontFamily: 'inherit', color: '#0f172a', background: '#fafafa' }}
-              onFocus={e => e.target.style.borderColor = '#6366f1'}
-              onBlur={e => e.target.style.borderColor = '#e2e8f0'} />
-
-            <div style={{ display: 'flex', gap: 10 }}>
-              <button onClick={() => setShowUpload(false)}
-                style={{ flex: 1, padding: '11px', borderRadius: 9, border: '1.5px solid #e2e8f0', background: 'white', color: '#374151', cursor: 'pointer', fontSize: 13, fontWeight: 600, transition: 'background 0.12s' }}
-                onMouseEnter={e => e.currentTarget.style.background = '#f8fafc'}
-                onMouseLeave={e => e.currentTarget.style.background = 'white'}>
-                Cancel
-              </button>
-              <button onClick={handleUpload} disabled={uploading}
-                style={{
-                  flex: 2, padding: '11px', borderRadius: 9, border: 'none',
-                  background: uploading ? '#c7d2fe' : 'linear-gradient(135deg, #4f46e5, #6366f1)',
-                  color: 'white', cursor: uploading ? 'default' : 'pointer',
-                  fontSize: 13, fontWeight: 700, transition: 'all 0.15s',
-                  boxShadow: uploading ? 'none' : '0 2px 10px rgba(79,70,229,0.4)'
-                }}>
-                {uploading ? <span><span className="spin">⟳</span> Preparing review…</span> : '→ Upload & Start AI Review'}
-              </button>
-            </div>
+          <label htmlFor="contract-name">Contract / project name <span aria-hidden="true">*</span></label>
+          <input id="contract-name" value={form.name} onChange={event => setForm(current => ({ ...current, name:event.target.value }))} placeholder="e.g. Oak Ridge Infrastructure Contract" required />
+          <label htmlFor="contract-client">Client</label>
+          <input id="contract-client" value={form.company} list="client-options" onChange={event => setForm(current => ({ ...current, company:event.target.value }))} placeholder="Select or enter a new client" />
+          <datalist id="client-options">{clients.map(client => <option key={client} value={client} />)}</datalist>
+          <label htmlFor="contract-location">Location / jurisdiction</label>
+          <input id="contract-location" value={form.location} onChange={event => setForm(current => ({ ...current, location:event.target.value }))} placeholder="e.g. Denver, CO" />
+          <label htmlFor="contract-file">Document</label>
+          <input ref={fileRef} id="contract-file" type="file" accept=".pdf,.txt" onChange={event => { setFile(event.target.files[0]); setPasteText('') }} style={{ display:'none' }} />
+          <button type="button" className="civic-btn" style={{ width:'100%', minHeight:70, borderStyle:'dashed', justifyContent:'start' }} onClick={() => fileRef.current?.click()}><Icon name="file" /> {file ? file.name : 'Choose PDF or TXT file (up to 50 MB)'}</button>
+          <label htmlFor="contract-text">Or paste text</label>
+          <textarea id="contract-text" value={pasteText} onChange={event => { setPasteText(event.target.value); setFile(null) }} placeholder="Paste proposal text here…" rows={4} />
+          <div style={{ display:'flex', justifyContent:'end', gap:9, marginTop:22 }}>
+            <button className="civic-btn" onClick={closeUpload}>Cancel</button>
+            <button className="civic-btn civic-btn-primary" disabled={uploading} onClick={handleUpload}>{uploading ? 'Preparing review…' : 'Upload & start review'}</button>
           </div>
         </div>
-      )}
+      </div>}
     </div>
   )
 }

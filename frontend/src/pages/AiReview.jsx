@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { useApiFetch } from '../context/AuthContext'
+import { useApiFetch, useAuth } from '../context/AuthContext'
+import Icon from '../components/Icon'
 
 const ACTIVE = new Set(['queued', 'in_progress', 'running'])
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -9,9 +10,11 @@ export default function AiReview() {
   const { id } = useParams()
   const nav = useNavigate()
   const apiFetch = useApiFetch()
+  const { token } = useAuth()
   const alive = useRef(true)
   const polling = useRef(false)
   const runNumber = useRef(0)
+  const initialHashScroll = useRef(false)
   const [proposal, setProposal] = useState(null)
   const [sources, setSources] = useState(null)
   const [runtime, setRuntime] = useState(null)
@@ -19,6 +22,7 @@ export default function AiReview() {
   const [results, setResults] = useState({ document_review: null, standards_comparison: null, diagram_analysis: null })
   const [error, setError] = useState('')
   const [starting, setStarting] = useState('')
+  const [section, setSection] = useState(() => window.location.hash || '#overview')
 
   const readJson = async response => {
     try { return await response.json() } catch { return { error: `The server returned an unreadable response (${response.status}).` } }
@@ -55,6 +59,7 @@ export default function AiReview() {
 
   useEffect(() => {
     alive.current = true
+    initialHashScroll.current = false
     refresh().catch(failure => setError(failure.message))
     return () => { alive.current = false; runNumber.current += 1 }
   }, [id])
@@ -71,6 +76,18 @@ export default function AiReview() {
       requestAnimationFrame(() => document.getElementById('controlling-standards')?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
     }
   }, [results.standards_comparison])
+
+  useEffect(() => {
+    const syncHash = () => setSection(window.location.hash || '#overview')
+    window.addEventListener('hashchange', syncHash)
+    return () => window.removeEventListener('hashchange', syncHash)
+  }, [])
+
+  useEffect(() => {
+    if (!proposal || initialHashScroll.current) return
+    initialHashScroll.current = true
+    if (window.location.hash) requestAnimationFrame(() => document.getElementById(window.location.hash.slice(1))?.scrollIntoView({ block:'start' }))
+  }, [proposal])
 
   const request = async (url, options) => {
     const response = await apiFetch(url, options)
@@ -176,7 +193,7 @@ export default function AiReview() {
     } catch (failure) { setError(failure.message) }
   }
 
-  if (!proposal) return null
+  if (!proposal) return <div className="civic-page" role="status" style={{ display:'grid', placeItems:'center', minHeight:'100vh' }}>Loading compliance review…</div>
   const aiReady = runtime?.aiEnabled !== false && runtime?.aiConfigured !== false
   const activeLabel = labels[activeType] || ''
   const locked = Boolean(activeType || starting)
@@ -196,70 +213,87 @@ export default function AiReview() {
     return results[type] ? `Re-run ${labels[type]}` : runLabels[type]
   }
 
-  return <div style={{ minHeight: '100vh', background: '#f1f5f9' }}>
-    <header style={{ height: 64, background: '#0f172a', color: 'white', display: 'flex', alignItems: 'center', padding: '0 24px', gap: 14 }}>
-      <button onClick={() => nav(`/proposal/${id}`)} style={darkButton}>← Proposal</button>
-      <div style={{ flex: 1 }}>
-        <div style={{ fontWeight: 850 }}>AI Review Center</div>
-        <div style={{ fontSize: 11, color: '#a5b4fc' }}>{proposal.name} · {proposal.location}</div>
-      </div>
-      {activeType && <button onClick={stopActive} style={{ ...darkButton, background: '#7f1d1d', color: '#fecaca' }}>■ Stop AI task</button>}
+  const document = results.document_review
+  const comparison = results.standards_comparison
+  const diagrams = results.diagram_analysis
+  const criticalCount = (document?.counts?.red || 0) + (comparison?.summary?.fail || 0) + (diagrams?.criticalIssues?.length || 0)
+  const reviewCount = (document?.counts?.yellow || 0) + (comparison?.summary?.review || 0) + (diagrams?.diagrams || []).filter(item => item.compliance === 'yellow').length
+  const completedCount = Object.values(results).filter(Boolean).length
+  const assessment = criticalCount ? 'Needs updates' : reviewCount ? 'Engineer review' : completedCount ? 'No concern flagged' : 'Awaiting review'
+  const lastReview = [document?.generatedAt, comparison?.generatedAt, diagrams?.generatedAt].filter(Boolean).sort().at(-1)
+  const sections = [
+    ['#overview', 'Overview', 'grid', null],
+    ['#document-review-results', 'Document review', 'file', document?.reviewedPages],
+    ['#controlling-standards', 'Standards comparison', 'scales', comparison?.matrix?.length],
+    ['#diagram-analysis-results', 'Diagram analysis', 'diagram', diagrams?.diagrams?.length]
+  ]
+  const sectionLinks = sections.map(([href, title, icon, count]) => <a key={href} href={href} onClick={() => setSection(href)} className={`civic-section-link ${section === href ? 'active' : ''}`}><Icon name={icon} size={17} />{title}{count != null && <span className="count">{count}</span>}</a>)
+
+  return <div className="civic-page">
+    <header className="civic-header">
+      <button onClick={() => nav(`/proposal/${id}`)} className="civic-btn civic-icon-btn" title="Back to proposal" aria-label="Back to proposal"><Icon name="arrow" /></button>
+      <a href="/" className="civic-brand"><span className="civic-brand-mark"><Icon name="civic" size={18} /></span><span>CivicReview AI</span></a>
+      <div className="civic-header-meta"><strong title={proposal.name}>{proposal.name}</strong><span className="jurisdiction">{proposal.location || 'Jurisdiction not set'}</span></div>
+      {activeType && <button onClick={stopActive} className="civic-btn civic-btn-danger">Stop AI task</button>}
     </header>
-
-    <main style={{ maxWidth: 1180, margin: '0 auto', padding: 26 }}>
-      <div style={{ marginBottom: 20 }}>
-        <h1 style={{ fontSize: 25, marginBottom: 7 }}>One place for every AI action</h1>
-        <p style={{ color: '#64748b', lineHeight: 1.6 }}>Only one AI task can run at a time. While it runs, every AI action locks and the active button shows its current work.</p>
-      </div>
-
-      {error && <div style={errorStyle}>{error}</div>}
-      {!aiReady && <div style={warningStyle}>AI is disabled or its API key is unavailable. No paid request can start.</div>}
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(260px,1fr))', gap: 14, marginBottom: 20 }}>
+    <nav className="civic-mobile-nav" aria-label="Review sections">{sectionLinks}</nav>
+    <div className="civic-review-layout">
+      <aside className="civic-review-sidebar"><div className="civic-eyebrow" style={{ padding:'0 12px 12px' }}>Review workspace</div><nav aria-label="Review sections">{sectionLinks}</nav><div className="civic-sidebar-foot"><strong>{completedCount} of 3 analyses complete</strong><div>{assessment}</div><p style={{ marginTop:10 }}>AI findings support review. Final approval remains with the responsible engineer.</p></div></aside>
+    <main className="civic-review-main">
+      <section id="overview">
+        <div className="civic-overview-heading"><div><div className="civic-eyebrow">AI review workspace</div><h1 className="civic-title">Compliance review</h1><p className="civic-muted" style={{ fontSize:14 }}>{proposal.name} · {proposal.location || 'Jurisdiction not set'}{lastReview && <> · Last reviewed {new Date(lastReview).toLocaleString()}</>}</p></div><a className="civic-btn" href="#review-coverage" onClick={() => setSection('#overview')}>Review actions <Icon name="chevron" size={15} /></a></div>
+        <div className="civic-card civic-summary"><div className="assessment"><div className="civic-eyebrow">Overall assessment</div><strong>{assessment}</strong><p>{activeType ? `${activeLabel} is running.` : completedCount ? `${completedCount} of 3 analyses have saved results.` : 'Run an analysis to begin reviewing evidence.'}</p></div><div className="critical"><div className="civic-eyebrow">Critical / fail</div><strong>{criticalCount}</strong><p>Needs attention</p></div><div className="review"><div className="civic-eyebrow">Engineer review</div><strong>{reviewCount}</strong><p>Needs judgment</p></div><div><div className="civic-eyebrow">Diagrams</div><strong>{diagrams?.diagrams?.length || 0}</strong><p>Visual elements found</p></div></div>
+      </section>
+      {error && <div className="civic-notice error" role="alert" style={{ marginBottom:16 }}>{error}</div>}
+      {!aiReady && <div className="civic-notice warning" style={{ marginBottom:16 }}>AI is disabled or its API key is unavailable. No paid request can start.</div>}
+      <div aria-live="polite" className="sr-only">{activeType ? buttonText(activeType) : starting ? `Starting ${labels[starting]}` : 'AI review idle'}</div>
+      <section id="review-coverage"><div className="civic-section-heading"><div><div className="civic-eyebrow">Review coverage</div><h2 className="civic-section-title">Run an analysis</h2></div><p className="civic-muted" style={{ fontSize:12, maxWidth:330 }}>Only one AI task can run at a time. Other actions unlock when it finishes.</p></div>
+      <div className="civic-action-grid">
         <ActionCard
-          icon="📄" title="Run AI API" tooltip="Reviews the proposal in exact three-page batches. It records findings for each page, saves after every batch, resumes after reload, and stops at the configured time, page, or token limit."
+          icon="file" title="Document review" tooltip="Reviews the proposal in exact three-page batches. It records findings for each page, saves after every batch, resumes after reload, and stops at the configured time, page, or token limit."
           description="Review the document three pages at a time and save page-by-page engineering findings."
-          buttonText={buttonText('document_review')} disabled={!aiReady || locked} active={activeType === 'document_review'} onRun={startDocumentReview}
+          state={document ? `${document.reviewedPages || 0} pages reviewed · ${document.counts?.red || 0} critical` : 'Not run yet'} buttonText={buttonText('document_review')} disabled={!aiReady || locked} active={activeType === 'document_review'} onRun={startDocumentReview}
         />
         <ActionCard
-          icon="⚖️" title="Structured standards comparison" tooltip="Checks the project state first and then only the named city. It compares the proposal with the governed standards catalog and excludes unrelated cities, counties, districts, and publishers."
+          icon="scales" title="Standards comparison" tooltip="Checks the project state first and then only the named city. It compares the proposal with the governed standards catalog and excludes unrelated cities, counties, districts, and publishers."
           description="Compare the proposal against the applicable state and city standards repository."
-          buttonText={buttonText('standards_comparison')} disabled={!aiReady || locked} active={activeType === 'standards_comparison'} onRun={startComparison}
+          state={comparison ? `${comparison.matrix?.length || 0} requirements compared` : 'Not run yet'} buttonText={buttonText('standards_comparison')} disabled={!aiReady || locked} active={activeType === 'standards_comparison'} onRun={startComparison}
         />
         <ActionCard
-          icon="🏗️" title="Analyze diagrams" tooltip="Reads the attached PDF for plans, details, tables, schedules, and diagrams. It flags visible concerns and checks them against jurisdiction-filtered sources."
+          icon="diagram" title="Diagram analysis" tooltip="Reads the attached PDF for plans, details, tables, schedules, and diagrams. It flags visible concerns and checks them against jurisdiction-filtered sources."
           description="Inspect drawings and visual document elements that text extraction may miss."
-          buttonText={buttonText('diagram_analysis')} disabled={!aiReady || locked || !proposal.file_path} active={activeType === 'diagram_analysis'} onRun={startDiagrams}
+          state={diagrams ? `${diagrams.diagrams?.length || 0} diagrams found` : 'Not run yet'} buttonText={buttonText('diagram_analysis')} disabled={!aiReady || locked || !proposal.file_path} disabledReason={!proposal.file_path ? 'Attach a proposal file to analyze diagrams.' : ''} active={activeType === 'diagram_analysis'} onRun={startDiagrams}
         />
       </div>
-
+      </section>
       <PageTracker job={jobs.document_review} review={results.document_review} limits={runtime?.aiReviewLimits} />
       <SourceSummary sources={sources} />
-      <Results results={results} />
       <DocumentReviewDetails review={results.document_review} />
       <StandardsComparison review={results.standards_comparison} />
-      <DiagramAnalysisDetails analysis={results.diagram_analysis} />
+      <DiagramAnalysisDetails analysis={results.diagram_analysis} fileUrl={proposal.file_path ? `/api/proposals/${id}/file?token=${encodeURIComponent(token || '')}` : ''} proposalUrl={`/proposal/${id}`} />
     </main>
+    </div>
   </div>
 }
 
-function ActionCard({ icon, title, tooltip, description, buttonText, disabled, active, onRun }) {
-  return <section style={{ ...card, borderColor: active ? '#818cf8' : '#e2e8f0', boxShadow: active ? '0 0 0 3px #e0e7ff' : card.boxShadow }}>
-    <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 10 }}>
-      <span style={{ fontSize: 24 }}>{icon}</span>
-      <h2 style={{ fontSize: 15, flex: 1 }}>{title}</h2>
-      <span className="ai-tooltip" tabIndex="0" aria-label={`About ${title}`}>?
+function ActionCard({ icon, title, tooltip, description, state, buttonText, disabled, disabledReason, active, onRun }) {
+  return <div className={`civic-card civic-action-card ${active ? 'active' : ''}`}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+      <span className="civic-action-icon">{active ? <span className="spin">◌</span> : <Icon name={icon} />}</span>
+      <h3 style={{ flex: 1 }}>{title}</h3>
+      <span className="ai-tooltip" tabIndex="0" aria-label={`About ${title}`}><Icon name="info" size={14} />
         <span className="ai-tooltip-content">{tooltip}</span>
       </span>
     </div>
-    <p style={{ color: '#64748b', fontSize: 12.5, lineHeight: 1.55, minHeight: 58 }}>{description}</p>
-    <button onClick={onRun} disabled={disabled} style={{ width: '100%', padding: '10px 12px', border: 0, borderRadius: 8, marginTop: 12, fontWeight: 800, cursor: disabled ? 'not-allowed' : 'pointer', background: active ? '#4338ca' : disabled ? '#cbd5e1' : '#4f46e5', color: disabled && !active ? '#64748b' : 'white' }}>
-      {active && <span className="spin" style={{ marginRight: 7 }}>⟳</span>}{buttonText}
+    <p>{description}</p><div className="civic-action-state">{active ? buttonText : state}</div>
+    <button onClick={onRun} disabled={disabled} title={disabled ? disabledReason || buttonText : undefined} className="civic-btn civic-btn-primary">
+      {buttonText}
     </button>
-  </section>
+  </div>
 }
 
 function PageTracker({ job, review, limits }) {
+  if (!job) return null
   const total = job?.reviewPageLimit || review?.reviewedPages || 0
   const completed = job?.completedPages ?? review?.reviewedPages ?? 0
   const batchSize = job?.batchSize || limits?.batchSize || 3
@@ -269,10 +303,10 @@ function PageTracker({ job, review, limits }) {
   return <section style={{ ...card, marginBottom: 16 }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
       <div><div style={eyebrow}>Three-page AI tracker</div><h2 style={{ fontSize: 19, marginTop: 5 }}>{job ? statusHeading(job) : 'Ready to review'}</h2></div>
-      <div style={{ color: '#4338ca', fontWeight: 850, fontSize: 20 }}>{job ? `${percent}%` : '—'}</div>
+      <div style={{ color: '#087d73', fontWeight: 850, fontSize: 20 }}>{job ? `${percent}%` : '—'}</div>
     </div>
     <div style={{ height: 8, borderRadius: 10, background: '#e2e8f0', overflow: 'hidden', margin: '16px 0 18px' }}>
-      <div style={{ height: '100%', width: `${percent}%`, background: terminal && job.status !== 'completed' ? '#f59e0b' : '#4f46e5', transition: 'width .3s ease' }} />
+      <div style={{ height: '100%', width: `${percent}%`, background: terminal && job.status !== 'completed' ? '#f59e0b' : '#087d73', transition: 'width .3s ease' }} />
     </div>
     {job ? <>
       <div className="batch-tracker">
@@ -287,7 +321,7 @@ function PageTracker({ job, review, limits }) {
           </div>
         })}
       </div>
-      <div style={{ color: '#64748b', fontSize: 12, marginTop: 14 }}>
+      <div style={{ color: '#66717d', fontSize: 12, marginTop: 14 }}>
         {completed} of {total} reviewable pages saved · {batches} batch{batches === 1 ? '' : 'es'} · three pages maximum per request
         {job.totalPages > job.reviewPageLimit && <> · document has {job.totalPages} pages; automatic cap is {job.reviewPageLimit}</>}
       </div>
@@ -295,7 +329,7 @@ function PageTracker({ job, review, limits }) {
     </> : <div className="batch-tracker preview">
       {['Prepare', 'Pages 1–3', 'Pages 4–6', 'Continue', 'Results'].map((label, index) => <div className="batch-step-wrap" key={label}><div className="batch-step">{index + 1}</div><div className="batch-label">{label}</div></div>)}
     </div>}
-    <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 15 }}>Automatic safeguards: {limits?.maxMinutes || 5} minutes · {limits?.maxPages || 30} pages · {(limits?.maxTokens || 75000).toLocaleString()} tokens.</div>
+    <div style={{ fontSize: 11, color: '#66717d', marginTop: 15 }}>Automatic safeguards: {limits?.maxMinutes || 5} minutes · {limits?.maxPages || 30} pages · {(limits?.maxTokens || 75000).toLocaleString()} tokens.</div>
   </section>
 }
 
@@ -314,158 +348,79 @@ function SourceSummary({ sources }) {
   return <section style={{ ...card, marginBottom: 16 }}>
     <div style={eyebrow}>Jurisdiction filter</div>
     <div style={{ fontSize: 18, fontWeight: 850, marginTop: 6 }}>{sources.jurisdiction?.resolved ? `${sources.jurisdiction.state} → ${sources.jurisdiction.city}` : 'City and state required'}</div>
-    <div style={{ color: '#64748b', fontSize: 12, marginTop: 5 }}>{sources.stateDocumentCount || 0} state records · {sources.cityDocumentCount || 0} city records · {sources.excludedJurisdictionDocumentCount || 0} unrelated records excluded</div>
-  </section>
-}
-
-function Results({ results }) {
-  const document = results.document_review
-  const comparison = results.standards_comparison
-  const diagrams = results.diagram_analysis
-  if (!document && !comparison && !diagrams) return null
-  return <section style={card}>
-    <div style={eyebrow}>Saved AI results</div>
-    {document && <div style={resultRow}><div><b>Document review</b><div style={resultText}>{document.reviewedPages} pages reviewed · {document.counts?.red || 0} red · {document.counts?.yellow || 0} yellow · {document.counts?.green || 0} green</div></div><span style={statusPill(document.status)}>{document.status}</span></div>}
-    {comparison && <div style={resultRow}><div><b>Standards comparison</b><div style={resultText}>{comparison.summary?.fail || 0} fail · {comparison.summary?.review || 0} engineer review · {comparison.summary?.pass || 0} pass</div></div><span style={statusPill('completed')}>shown below</span></div>}
-    {diagrams && <div style={resultRow}><div><b>Diagram analysis</b><div style={resultText}>{diagrams.diagrams?.length || 0} diagrams found · {diagrams.criticalIssues?.length || 0} critical issues</div></div><span style={statusPill('completed')}>complete</span></div>}
+    <div style={{ color: '#66717d', fontSize: 12, marginTop: 5 }}>{sources.stateDocumentCount || 0} state records · {sources.cityDocumentCount || 0} city records · {sources.excludedJurisdictionDocumentCount || 0} unrelated records excluded</div>
   </section>
 }
 
 function DocumentReviewDetails({ review }) {
-  if (!review) return null
+  if (!review) return <section id="document-review-results" className="civic-card civic-section-bar"><div className="civic-eyebrow">Document review</div><h2 className="civic-section-title" style={{ marginTop:6 }}>Page-by-page findings</h2><p className="civic-muted" style={{ fontSize:12, marginTop:7 }}>Run document review to see saved page findings here.</p></section>
   const pages = review.pageReviews || []
-  return <section id="document-review-results" style={{ ...card, marginTop: 16, padding: 0, overflow: 'hidden' }}>
-    <div style={{ padding: 18, borderBottom: '1px solid #e2e8f0' }}>
-      <div style={eyebrow}>Run AI API results</div>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginTop: 6, flexWrap: 'wrap' }}>
-        <div>
-          <h2 style={{ fontSize: 20, marginBottom: 5 }}>Page-by-page document findings</h2>
-          <div style={{ color: '#64748b', fontSize: 12 }}>
-            {review.reviewedPages || pages.length} pages reviewed in batches of {review.batchSize || 3}
-            {review.usage?.totalTokens ? ` · ${review.usage.totalTokens.toLocaleString()} tokens used` : ''}
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Count label="Needs updates" value={review.counts?.red || 0} color="#dc2626" />
-          <Count label="Needs review" value={review.counts?.yellow || 0} color="#a16207" />
-          <Count label="No concern" value={review.counts?.green || 0} color="#15803d" />
-        </div>
-      </div>
-      {review.stoppedReason && <div style={{ ...warningStyle, margin: '14px 0 0' }}>{review.stoppedReason} The findings completed before the stop were saved below.</div>}
-    </div>
-    <div style={{ padding: 18 }}>
-      {pages.length ? pages.map(page => <details key={page.pageNumber} open={page.score !== 'green'} style={detailCard(page.score)}>
-        <summary style={detailSummary}>
-          <span style={scoreDot(page.score)} />
-          <span style={{ fontWeight: 850 }}>Page {page.pageNumber}</span>
-          <span style={scorePill(page.score)}>{scoreLabels[page.score] || 'Needs review'}</span>
-          <span style={{ color: '#64748b', fontSize: 12, fontWeight: 500, flex: 1 }}>{page.summary}</span>
-          <span style={{ color: '#94a3b8', fontSize: 11 }}>{page.findings?.length || 0} finding{page.findings?.length === 1 ? '' : 's'} ▾</span>
-        </summary>
-        <div style={{ padding: '0 14px 14px' }}>
-          {page.findings?.length ? page.findings.map((finding, index) => <div key={`${finding.category}-${index}`} style={{ padding: '12px 13px', background: 'white', border: '1px solid #e2e8f0', borderRadius: 9, marginTop: 9 }}>
-            <div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', marginBottom: 7 }}>
-              <span style={severityPill(finding.severity)}>{humanize(finding.severity)}</span>
-              <span style={{ fontSize: 10, color: '#475569', fontWeight: 800, textTransform: 'uppercase' }}>{humanize(finding.category)}</span>
-            </div>
-            <div style={{ fontSize: 13, color: '#1e293b', fontWeight: 750, lineHeight: 1.5 }}>{finding.finding}</div>
-            <Evidence label="Proposal evidence" text={finding.evidence} />
-            <Evidence label="Recommended action" text={finding.recommendation} color="#6d28d9" />
-          </div>) : <div style={{ color: '#64748b', fontSize: 12, paddingTop: 10 }}>No specific findings were returned for this page.</div>}
-        </div>
-      </details>) : <div style={{ color: '#64748b' }}>No page-level findings were returned. Run the document review again to create the detailed page record.</div>}
-    </div>
+  const rank = { critical:0, review:1, informational:2 }
+  return <section id="document-review-results" className="civic-card civic-result-section">
+    <div className="civic-section-bar"><div className="civic-eyebrow">Document review</div><div className="civic-section-heading" style={{ margin:'6px 0 0' }}><div><h2 className="civic-section-title">Page-by-page findings</h2><p className="civic-muted" style={{ fontSize:12, marginTop:5 }}>{review.reviewedPages || pages.length} pages reviewed in batches of {review.batchSize || 3}{review.usage?.totalTokens ? ` · ${review.usage.totalTokens.toLocaleString()} tokens used` : ''}</p></div><div className="civic-counts"><span className="civic-pill red">{review.counts?.red || 0} needs updates</span><span className="civic-pill amber">{review.counts?.yellow || 0} engineer review</span><span className="civic-pill green">{review.counts?.green || 0} no concern</span></div></div>{review.stoppedReason && <div className="civic-notice warning" style={{ marginTop:12 }}>{review.stoppedReason} The findings completed before the stop were saved below.</div>}</div>
+    <div className="civic-page-list">{pages.length ? pages.map(page => <details key={page.pageNumber} className="civic-page-detail" open={page.score !== 'green'}><summary><strong style={{ whiteSpace:'nowrap' }}>Page {page.pageNumber}</strong><span className={`civic-pill ${page.score === 'red' ? 'red' : page.score === 'green' ? 'green' : 'amber'}`}>{scoreLabels[page.score] || 'Engineer review'}</span><span className="civic-muted" style={{ fontSize:12, flex:1, minWidth:140 }}>{page.summary}</span><span className="civic-muted" style={{ fontSize:11, whiteSpace:'nowrap' }}>{page.findings?.length || 0} findings</span><Icon name="chevron" size={16} /></summary><div className="civic-findings">{page.findings?.length ? [...page.findings].sort((a,b) => (rank[a.severity] ?? 2) - (rank[b.severity] ?? 2)).map((finding,index) => <div className="civic-finding" key={`${finding.category}-${index}`}><div style={{ display:'flex', gap:8, alignItems:'center', marginBottom:7 }}><span className={`civic-pill ${finding.severity === 'critical' ? 'red' : finding.severity === 'review' ? 'amber' : ''}`}>{humanize(finding.severity || 'informational')}</span><span className="civic-eyebrow">{humanize(finding.category)}</span></div><strong style={{ fontSize:14, color:'var(--navy)' }}>{finding.finding}</strong><div className="civic-evidence-grid"><div className="civic-evidence"><div className="civic-eyebrow" style={{ marginBottom:5 }}>Proposal evidence</div>{finding.evidence || 'No evidence provided.'}</div><div className="civic-evidence action"><div className="civic-eyebrow" style={{ marginBottom:5, color:'var(--teal)' }}>Recommended action</div>{finding.recommendation || 'No action provided.'}</div></div></div>) : <p className="civic-muted" style={{ paddingTop:12, fontSize:12 }}>No specific findings were returned for this page.</p>}</div></details>) : <div className="civic-notice">No page-level findings were returned. Run the document review again to create the detailed page record.</div>}</div>
   </section>
 }
 
 function StandardsComparison({ review }) {
-  if (!review) return null
+  if (!review) return <section id="controlling-standards" className="civic-card civic-section-bar"><div className="civic-eyebrow">Standards comparison</div><h2 className="civic-section-title" style={{ marginTop:6 }}>State and city requirements</h2><p className="civic-muted" style={{ fontSize:12, marginTop:7 }}>Run standards comparison to see applicable requirements here.</p></section>
   const matrix = review.matrix || []
-  return <section id="controlling-standards" style={{ ...card, marginTop: 16, padding: 0, overflow: 'hidden' }}>
-    <div style={{ padding: 18, borderBottom: '1px solid #e2e8f0' }}>
-      <div style={eyebrow}>Controlling standards</div>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, marginTop: 6, flexWrap: 'wrap' }}>
-        <div>
-          <h2 style={{ fontSize: 20, marginBottom: 5 }}>State and city standards comparison</h2>
-          <div style={{ color: '#64748b', fontSize: 12 }}>
-            {(review.jurisdiction?.state || review.sourceStatus?.jurisdiction?.state || 'State')} → {(review.jurisdiction?.city || review.sourceStatus?.jurisdiction?.city || 'City')} · {(review.projectScope || []).join(', ') || 'Scope not identified'}
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Count label="Pass" value={review.summary?.pass || 0} color="#15803d" />
-          <Count label="Fail" value={review.summary?.fail || 0} color="#dc2626" />
-          <Count label="Engineer review" value={review.summary?.review || 0} color="#a16207" />
-        </div>
-      </div>
-    </div>
-    {matrix.length ? <div style={{ overflowX: 'auto' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-        <thead><tr>{['Requirement', 'City / client', 'Site-specific', 'Proposal', 'Controlling', 'Result', 'Reason & correction', 'Citation'].map(column => <th key={column} style={tableHead}>{column}</th>)}</tr></thead>
-        <tbody>{matrix.map((row, index) => <tr key={row.id || `${row.subject}-${index}`}>
-          <td style={tableCell}><b>{row.subject}</b><div style={{ color: '#64748b', marginTop: 3 }}>{row.requirement}</div></td>
-          <td style={tableCell}>{row.cityStandard || '—'}</td>
-          <td style={tableCell}>{row.siteRequirement || '—'}</td>
-          <td style={tableCell}>{row.proposalValue || '—'}</td>
-          <td style={tableCell}><b>{row.controllingValue || 'Unresolved'}</b></td>
-          <td style={tableCell}><span style={comparisonPill(row.result)}>{(row.result || 'review').toUpperCase()}</span></td>
-          <td style={tableCell}>{row.reason}<div style={{ color: '#7c3aed', marginTop: 5 }}>{row.recommendedCorrection}</div></td>
-          <td style={tableCell}>{row.source ? <><b>{row.source.title}</b><div style={{ marginTop: 3 }}>Page {row.source.page || 'not identified'}</div>{row.source.excerpt && <div style={{ color: '#64748b', marginTop: 4 }}>&ldquo;{row.source.excerpt}&rdquo;</div>}</> : 'No controlling citation'}</td>
-        </tr>)}</tbody>
-      </table>
-    </div> : <div style={{ padding: 18, color: '#64748b' }}>The comparison completed without returning matrix rows. Engineer review is required.</div>}
-    <div style={{ padding: '12px 18px', background: '#f8fafc', color: '#64748b', fontSize: 11, borderTop: '1px solid #e2e8f0' }}>
-      Decision policy: {review.decisionPolicy || 'Final approval remains with the responsible engineer.'}
-    </div>
+  const status = review.sourceStatus || {}
+  return <section id="controlling-standards" className="civic-card civic-result-section"><div className="civic-section-bar"><div className="civic-eyebrow">Standards comparison</div><h2 className="civic-section-title" style={{ marginTop:6 }}>State and city requirements</h2><p className="civic-muted" style={{ fontSize:12, marginTop:5 }}>{(review.jurisdiction?.state || status.jurisdiction?.state || 'State')} → {(review.jurisdiction?.city || status.jurisdiction?.city || 'City')} · {(review.projectScope || []).join(', ') || 'Scope not identified'}</p><div className="civic-counts" style={{ marginTop:14 }}><span className="civic-pill">{status.stateDocumentCount || 0} state records</span><span className="civic-pill">{status.cityDocumentCount || 0} city records</span><span className="civic-pill">{status.excludedJurisdictionDocumentCount || 0} excluded</span><span className="civic-pill green">{review.summary?.pass || 0} pass</span><span className="civic-pill red">{review.summary?.fail || 0} fail</span><span className="civic-pill amber">{review.summary?.review || 0} engineer review</span></div></div>
+    <div className="civic-standards-list">{matrix.length ? matrix.map((row,index) => <details className="civic-standard-row" key={row.id || `${row.subject}-${index}`}><summary><div><strong style={{ color:'var(--navy)', fontSize:13 }}>{row.subject || 'Requirement'}</strong><div className="civic-muted" style={{ fontSize:11, marginTop:3 }}>{row.requirement}</div></div><span className={`civic-pill ${row.result === 'pass' ? 'green' : row.result === 'fail' ? 'red' : 'amber'}`}>{row.result === 'review' ? 'Engineer review' : humanize(row.result || 'review')}</span><Icon name="chevron" size={16} /></summary><div className="fields"><Field label="City / client standard" value={row.cityStandard} /><Field label="Site-specific standard" value={row.siteRequirement} /><Field label="Proposal evidence" value={row.proposalValue} /><Field label="Controlling value" value={row.controllingValue || 'Unresolved'} /><Field label="Review reason" value={row.reason} wide /><div className="field correction"><b style={{ color:'var(--teal)' }}>Recommended correction</b>{row.recommendedCorrection || 'No correction specified.'}</div><div className="field wide"><b>Citation / source</b>{row.source ? <><strong>{row.source.title}</strong> · Page {row.source.page || 'not identified'}{row.source.excerpt && <p style={{ marginTop:6 }}>{row.source.excerpt}</p>}{row.source.url && <a href={row.source.url} target="_blank" rel="noreferrer" style={{ color:'var(--teal)', display:'inline-flex', gap:4, marginTop:6 }}>Open source <Icon name="external" size={13} /></a>}</> : 'No controlling citation'}</div></div></details>) : <div className="civic-notice">The comparison completed without returning matrix rows. Engineer review is required.</div>}</div><div style={{ padding:'14px 20px', borderTop:'1px solid var(--border)', background:'var(--subtle)', fontSize:12 }}><strong>Decision policy:</strong> {review.decisionPolicy || 'Final approval remains with the responsible engineer.'}</div>
   </section>
 }
 
-function DiagramAnalysisDetails({ analysis }) {
-  if (!analysis) return null
+function Field({ label, value, wide = false }) { return <div className={`field ${wide ? 'wide' : ''}`}><b>{label}</b>{value || '—'}</div> }
+
+function DiagramAnalysisDetails({ analysis, fileUrl, proposalUrl }) {
+  if (!analysis) return <section id="diagram-analysis-results" className="civic-card civic-section-bar"><div className="civic-eyebrow">Diagram analysis</div><h2 className="civic-section-title" style={{ marginTop:6 }}>Visual findings</h2><p className="civic-muted" style={{ fontSize:12, marginTop:7 }}>Analyze diagrams to see visual findings here.</p></section>
   const diagrams = analysis.diagrams || []
   const overall = analysis.overallCompliance || 'yellow'
-  return <section id="diagram-analysis-results" style={{ ...card, marginTop: 16, padding: 0, overflow: 'hidden' }}>
-    <div style={{ padding: 18, borderBottom: '1px solid #e2e8f0' }}>
-      <div style={eyebrow}>Diagram analysis results</div>
+  return <section id="diagram-analysis-results" className="civic-card civic-result-section">
+    <div className="civic-section-bar">
+      <div className="civic-eyebrow">Diagram analysis</div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginTop: 6, flexWrap: 'wrap' }}>
         <div style={{ maxWidth: 760 }}>
-          <h2 style={{ fontSize: 20, marginBottom: 7 }}>Plans, details, tables, and diagrams</h2>
+          <h2 className="civic-section-title" style={{ marginBottom: 7 }}>Plans, details, tables, and diagrams</h2>
           <p style={{ color: '#475569', fontSize: 13, lineHeight: 1.6 }}>{analysis.summary || 'No overall summary was returned.'}</p>
         </div>
-        <span style={{ ...scorePill(overall), fontSize: 11, padding: '7px 11px' }}>{diagramScoreLabels[overall] || 'Needs review'}</span>
+        <span className={`civic-pill ${overall === 'red' ? 'red' : overall === 'green' ? 'green' : 'amber'}`}>{diagramScoreLabels[overall] || 'Engineer review'}</span>
       </div>
     </div>
 
-    <div style={{ padding: 18 }}>
+    <div className="civic-diagram-grid"><div className="civic-pdf-viewer">{fileUrl ? <iframe title="Proposal document" src={fileUrl} /> : <div className="civic-notice">No source file is attached to this proposal.</div>}</div><div className="civic-diagram-findings">
+      <div style={{ marginBottom:12 }}><a href={proposalUrl} className="civic-btn">Open proposal viewer <Icon name="external" size={15} /></a></div>
       {analysis.criticalIssues?.length > 0 && <FindingList title="Critical issues" items={analysis.criticalIssues} color="#dc2626" background="#fef2f2" border="#fecaca" />}
-      {analysis.recommendations?.length > 0 && <FindingList title="Recommendations" items={analysis.recommendations} color="#6d28d9" background="#f5f3ff" border="#ddd6fe" />}
+      {analysis.recommendations?.length > 0 && <FindingList title="Recommendations" items={analysis.recommendations} color="#087d73" background="#e7f5f2" border="#c8e5df" />}
 
       <div style={{ ...eyebrow, margin: '18px 0 9px' }}>Diagram findings ({diagrams.length})</div>
-      {diagrams.length ? diagrams.map((diagram, index) => <details key={`${diagram.location}-${diagram.type}-${index}`} open={diagram.compliance !== 'green'} style={detailCard(diagram.compliance)}>
-        <summary style={detailSummary}>
-          <span style={scoreDot(diagram.compliance)} />
-          <span style={{ fontWeight: 850 }}>{diagram.type || `Diagram ${index + 1}`}</span>
-          <span style={scorePill(diagram.compliance)}>{diagramScoreLabels[diagram.compliance] || 'Needs review'}</span>
-          <span style={{ color: '#64748b', fontSize: 12, flex: 1 }}>{diagram.location || 'Location not identified'}</span>
-          <span style={{ color: '#94a3b8', fontSize: 11 }}>details ▾</span>
+      {diagrams.length ? diagrams.map((diagram, index) => <details key={`${diagram.location}-${diagram.type}-${index}`} className="civic-page-detail" open={diagram.compliance !== 'green'}>
+        <summary>
+          <span className="civic-pill teal">{index + 1}</span>
+          <span style={{ fontWeight: 750, color:'var(--navy)' }}>{diagram.type || `Diagram ${index + 1}`}</span>
+          <span className={`civic-pill ${diagram.compliance === 'red' ? 'red' : diagram.compliance === 'green' ? 'green' : 'amber'}`}>{diagramScoreLabels[diagram.compliance] || 'Engineer review'}</span>
+          <span style={{ color: '#66717d', fontSize: 12, flex: 1 }}>{diagram.location || 'Location not identified'}</span>
+          <Icon name="chevron" size={16} />
         </summary>
         <div style={{ padding: '0 14px 14px' }}>
           <p style={{ fontSize: 13, color: '#334155', lineHeight: 1.6, margin: '10px 0' }}>{diagram.description}</p>
           {diagram.concerns?.length > 0 && <FindingList title="Concerns" items={diagram.concerns} color="#dc2626" background="#fef2f2" border="#fecaca" compact />}
           {diagram.missingElements?.length > 0 && <FindingList title="Missing elements" items={diagram.missingElements} color="#a16207" background="#fffbeb" border="#fde68a" compact />}
           {diagram.positives?.length > 0 && <FindingList title="Positive findings" items={diagram.positives} color="#15803d" background="#f0fdf4" border="#bbf7d0" compact />}
-          {diagram.codes?.length > 0 && <div style={{ marginTop: 12 }}><div style={{ ...eyebrow, marginBottom: 6 }}>Codes and standards referenced</div><div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{diagram.codes.map((code, codeIndex) => <span key={`${code}-${codeIndex}`} style={{ padding: '5px 8px', borderRadius: 6, background: '#eef2ff', color: '#4338ca', border: '1px solid #c7d2fe', fontSize: 11, fontWeight: 700 }}>{code}</span>)}</div></div>}
+          {diagram.codes?.length > 0 && <div style={{ marginTop: 12 }}><div style={{ ...eyebrow, marginBottom: 6 }}>Codes and standards referenced</div><div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>{diagram.codes.map((code, codeIndex) => <span key={`${code}-${codeIndex}`} style={{ padding: '5px 8px', borderRadius: 6, background: '#e7f5f2', color: '#087d73', border: '1px solid #c7d2fe', fontSize: 11, fontWeight: 700 }}>{code}</span>)}</div></div>}
         </div>
-      </details>) : <div style={{ color: '#64748b', fontSize: 12 }}>No individual diagrams were returned.</div>}
+      </details>) : <div style={{ color: '#66717d', fontSize: 12 }}>No individual diagrams were returned.</div>}
 
       {analysis.researchFindings?.length > 0 && <div style={{ marginTop: 20 }}>
         <div style={{ ...eyebrow, marginBottom: 9 }}>Location research and sources</div>
-        {analysis.researchFindings.map((finding, index) => <div key={`${finding.sourceUrl}-${index}`} style={{ padding: '11px 13px', border: '1px solid #c7d2fe', background: '#eef2ff', borderRadius: 9, marginBottom: 8 }}>
+        {analysis.researchFindings.map((finding, index) => <div key={`${finding.sourceUrl}-${index}`} style={{ padding: '11px 13px', border: '1px solid #c7d2fe', background: '#e7f5f2', borderRadius: 9, marginBottom: 8 }}>
           <div style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap' }}><b style={{ fontSize: 12, color: '#3730a3' }}>{humanize(finding.category)}</b><span style={{ fontSize: 10, color: '#6366f1', textTransform: 'uppercase', fontWeight: 800 }}>{finding.confidence} confidence</span></div>
           <div style={{ color: '#334155', fontSize: 12.5, lineHeight: 1.55, marginTop: 5 }}>{finding.finding}</div>
-          <a href={finding.sourceUrl} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 6, color: '#4338ca', fontSize: 11.5, fontWeight: 800 }}>{finding.sourceTitle || 'Open verified source'} ↗</a>
+          <a href={finding.sourceUrl} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 6, color: '#087d73', fontSize: 11.5, fontWeight: 800 }}>{finding.sourceTitle || 'Open verified source'} ↗</a>
         </div>)}
       </div>}
-    </div>
+    </div></div>
   </section>
 }
 
@@ -476,41 +431,11 @@ function FindingList({ title, items, color, background, border, compact = false 
   </div>
 }
 
-function Evidence({ label, text, color = '#475569' }) {
-  if (!text) return null
-  return <div style={{ marginTop: 8, fontSize: 12, color, lineHeight: 1.5 }}><b>{label}:</b> {text}</div>
-}
-
-function Count({ label, value, color }) {
-  return <div style={{ minWidth: 76, padding: '8px 10px', borderRadius: 9, background: `${color}10`, border: `1px solid ${color}30`, textAlign: 'center' }}>
-    <div style={{ fontSize: 9, color, fontWeight: 850, textTransform: 'uppercase' }}>{label}</div>
-    <div style={{ fontSize: 20, color, fontWeight: 900, marginTop: 2 }}>{value}</div>
-  </div>
-}
-
 const labels = { document_review: 'Document review', standards_comparison: 'Standards comparison', diagram_analysis: 'Diagram analysis' }
-const runLabels = { document_review: 'Run AI API — 3 pages at a time', standards_comparison: 'Run structured standards comparison', diagram_analysis: 'Analyze diagrams' }
-const card = { background: 'white', border: '1px solid #e2e8f0', borderRadius: 13, padding: 18, boxShadow: '0 2px 8px rgba(15,23,42,.05)' }
-const darkButton = { border: 0, borderRadius: 8, padding: '8px 12px', cursor: 'pointer', fontWeight: 750, background: '#1e293b', color: '#cbd5e1' }
-const eyebrow = { fontSize: 10, color: '#64748b', textTransform: 'uppercase', letterSpacing: .9, fontWeight: 850 }
-const errorStyle = { padding: 13, background: '#fef2f2', border: '1px solid #fecaca', color: '#b91c1c', borderRadius: 9, marginBottom: 16 }
-const warningStyle = { padding: 13, background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', borderRadius: 9, marginBottom: 16 }
-const resultRow = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '13px 0', borderBottom: '1px solid #f1f5f9' }
-const resultText = { color: '#64748b', fontSize: 12, marginTop: 4 }
-const statusPill = status => ({ padding: '5px 9px', borderRadius: 20, fontSize: 10, fontWeight: 850, textTransform: 'uppercase', background: status === 'completed' ? '#dcfce7' : '#fef3c7', color: status === 'completed' ? '#15803d' : '#a16207' })
-const comparisonColors = { pass: '#15803d', fail: '#dc2626', review: '#a16207' }
-const comparisonPill = result => ({ padding: '4px 8px', borderRadius: 20, fontWeight: 850, color: comparisonColors[result] || comparisonColors.review, background: `${comparisonColors[result] || comparisonColors.review}14` })
-const tableHead = { textAlign: 'left', padding: 12, background: '#f8fafc', borderBottom: '1px solid #cbd5e1', color: '#475569', whiteSpace: 'nowrap' }
-const tableCell = { padding: 12, borderBottom: '1px solid #e2e8f0', verticalAlign: 'top', minWidth: 110, lineHeight: 1.45 }
-const scoreLabels = { green: 'No concern', yellow: 'Needs review', red: 'Needs updates' }
-const diagramScoreLabels = { green: 'Compliant', yellow: 'Needs review', red: 'Issues found' }
-const scorePalette = { green: { color: '#15803d', bg: '#f0fdf4', border: '#bbf7d0' }, yellow: { color: '#a16207', bg: '#fffbeb', border: '#fde68a' }, red: { color: '#dc2626', bg: '#fef2f2', border: '#fecaca' } }
-const detailCard = score => ({ border: `1px solid ${(scorePalette[score] || scorePalette.yellow).border}`, background: (scorePalette[score] || scorePalette.yellow).bg, borderRadius: 10, marginBottom: 9, overflow: 'hidden' })
-const detailSummary = { display: 'flex', alignItems: 'center', gap: 9, padding: '12px 14px', cursor: 'pointer', listStyle: 'none' }
-const scoreDot = score => ({ width: 9, height: 9, borderRadius: '50%', background: (scorePalette[score] || scorePalette.yellow).color, flexShrink: 0 })
-const scorePill = score => ({ padding: '4px 8px', borderRadius: 20, fontSize: 9.5, fontWeight: 850, textTransform: 'uppercase', whiteSpace: 'nowrap', color: (scorePalette[score] || scorePalette.yellow).color, background: 'white', border: `1px solid ${(scorePalette[score] || scorePalette.yellow).border}` })
-const severityPill = severity => {
-  const palette = severity === 'critical' ? scorePalette.red : severity === 'review' ? scorePalette.yellow : { color: '#475569', bg: '#f8fafc', border: '#cbd5e1' }
-  return { padding: '3px 7px', borderRadius: 20, fontSize: 9, fontWeight: 850, color: palette.color, background: palette.bg, border: `1px solid ${palette.border}`, textTransform: 'uppercase' }
-}
+const runLabels = { document_review: 'Run document review', standards_comparison: 'Run standards comparison', diagram_analysis: 'Analyze diagrams' }
+const card = { background: 'white', border: '1px solid #dde2e7', borderRadius: 13, padding: 18 }
+const eyebrow = { fontSize: 10, color: '#66717d', textTransform: 'uppercase', letterSpacing: .9, fontWeight: 750 }
+const warningStyle = { padding: 13, background: '#fff4df', border: '1px solid #efdbb8', color: '#94570e', borderRadius: 9, marginBottom: 16 }
+const scoreLabels = { green: 'No concern', yellow: 'Engineer review', red: 'Needs updates' }
+const diagramScoreLabels = { green: 'No concern', yellow: 'Engineer review', red: 'Needs updates' }
 const humanize = value => String(value || '').replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase())
