@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useApiFetch, useAuth } from '../context/AuthContext'
 import Icon from '../components/Icon'
+import { buildReviewReport, downloadReviewReport } from '../review-export.mjs'
 
 const ACTIVE = new Set(['queued', 'in_progress', 'running'])
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -22,7 +23,23 @@ export default function AiReview() {
   const [results, setResults] = useState({ document_review: null, standards_comparison: null, diagram_analysis: null })
   const [error, setError] = useState('')
   const [starting, setStarting] = useState('')
+  const [exporting, setExporting] = useState('')
+  const [exportError, setExportError] = useState('')
   const [section, setSection] = useState(() => window.location.hash || '#overview')
+
+  const exportReview = async (type, format) => {
+    setExporting(`${type}-${format}`); setExportError('')
+    try {
+      const snapshot = { ...results }
+      const job = jobs.document_review
+      if (!snapshot.document_review && job?.results?.length) snapshot.document_review = {
+        status: job.status, reviewedPages: job.completedPages, totalPages: job.totalPages,
+        generatedAt: job.updatedAt, pageReviews: job.results.flatMap(batch => batch.pageReviews || [])
+      }
+      await downloadReviewReport(buildReviewReport(proposal, snapshot, type, jobs), format)
+    } catch (failure) { setExportError(`Download failed: ${failure.message}`) }
+    finally { setExporting('') }
+  }
 
   const readJson = async response => {
     try { return await response.json() } catch { return { error: `The server returned an unreadable response (${response.status}).` } }
@@ -244,6 +261,13 @@ export default function AiReview() {
         <div className="civic-overview-heading"><div><div className="civic-eyebrow">AI review workspace</div><h1 className="civic-title">Compliance review</h1><p className="civic-muted" style={{ fontSize:14 }}>{proposal.name} · {[proposal.location, proposal.postalCode].filter(Boolean).join(' ') || 'Jurisdiction not set'}{lastReview && <> · Last reviewed {new Date(lastReview).toLocaleString()}</>}</p></div><a className="civic-btn" href="#review-coverage" onClick={() => setSection('#overview')}>Review actions <Icon name="chevron" size={15} /></a></div>
         <div className="civic-card civic-summary"><div className="assessment"><div className="civic-eyebrow">Overall assessment</div><strong>{assessment}</strong><p>{activeType ? `${activeLabel} is running.` : completedCount ? `${completedCount} of 3 analyses have saved results.` : 'Run an analysis to begin reviewing evidence.'}</p></div><div className="critical"><div className="civic-eyebrow">Critical / fail</div><strong>{criticalCount}</strong><p>Needs attention</p></div><div className="review"><div className="civic-eyebrow">Engineer review</div><strong>{reviewCount}</strong><p>Needs judgment</p></div><div><div className="civic-eyebrow">Diagrams</div><strong>{diagrams?.diagrams?.length || 0}</strong><p>Visual elements found</p></div></div>
       </section>
+      <section className="civic-card" aria-label="Download review results" style={{ padding:18, marginBottom:16 }}>
+        <div className="civic-eyebrow">Download results</div>
+        <p className="civic-muted" style={{ fontSize:12, marginTop:6 }}>PDF for sharing · editable text for copying findings and recommended changes into your document. Downloads contain saved results and citations.</p>
+        <DownloadButtons name="All results" onDownload={format => exportReview('all', format)} disabled={!!exporting || !Object.values(results).some(Boolean)} />
+        {exporting && <div role="status" style={{ fontSize:12, marginTop:8 }}>Preparing download…</div>}
+        {exportError && <div role="alert" className="civic-notice error" style={{ marginTop:10 }}>{exportError}</div>}
+      </section>
       {error && <div className="civic-notice error" role="alert" style={{ marginBottom:16 }}>{error}</div>}
       {!aiReady && <div className="civic-notice warning" style={{ marginBottom:16 }}>AI is disabled or its API key is unavailable. No paid request can start.</div>}
       <div aria-live="polite" className="sr-only">{activeType ? buttonText(activeType) : starting ? `Starting ${labels[starting]}` : 'AI review idle'}</div>
@@ -268,9 +292,9 @@ export default function AiReview() {
       </section>
       <PageTracker job={jobs.document_review} review={results.document_review} limits={runtime?.aiReviewLimits} />
       <SourceSummary sources={sources} />
-      <DocumentReviewDetails review={results.document_review} />
-      <StandardsComparison review={results.standards_comparison} />
-      <DiagramAnalysisDetails analysis={results.diagram_analysis} fileUrl={proposal.file_path ? `/api/proposals/${id}/file?token=${encodeURIComponent(token || '')}` : ''} proposalUrl={`/proposal/${id}`} />
+      <DocumentReviewDetails review={results.document_review} onDownload={format => exportReview('document_review', format)} downloading={!!exporting} />
+      <StandardsComparison review={results.standards_comparison} onDownload={format => exportReview('standards_comparison', format)} downloading={!!exporting} />
+      <DiagramAnalysisDetails onDownload={format => exportReview('diagram_analysis', format)} downloading={!!exporting} analysis={results.diagram_analysis} fileUrl={proposal.file_path ? `/api/proposals/${id}/file?token=${encodeURIComponent(token || '')}` : ''} proposalUrl={`/proposal/${id}`} />
     </main>
     </div>
   </div>
@@ -343,6 +367,13 @@ function statusHeading(job) {
   return `Reviewing pages ${start}–${end}`
 }
 
+function DownloadButtons({ name, onDownload, disabled }) {
+  return <div style={{ display:'flex', flexWrap:'wrap', gap:8, marginTop:12 }}>
+    <button type="button" className="civic-btn" disabled={disabled} onClick={() => onDownload('pdf')} aria-label={`Download ${name} PDF`}>Download {name === 'All results' ? 'all results ' : ''}PDF</button>
+    <button type="button" className="civic-btn" disabled={disabled} onClick={() => onDownload('text')} aria-label={`Download ${name} editable text`}>Download {name === 'All results' ? 'all results ' : ''}editable text</button>
+  </div>
+}
+
 function SourceSummary({ sources }) {
   if (!sources) return null
   return <section style={{ ...card, marginBottom: 16 }}>
@@ -353,28 +384,30 @@ function SourceSummary({ sources }) {
   </section>
 }
 
-function DocumentReviewDetails({ review }) {
+function DocumentReviewDetails({ review, onDownload, downloading }) {
   if (!review) return <section id="document-review-results" className="civic-card civic-section-bar"><div className="civic-eyebrow">Document review</div><h2 className="civic-section-title" style={{ marginTop:6 }}>Page-by-page findings</h2><p className="civic-muted" style={{ fontSize:12, marginTop:7 }}>Run document review to see saved page findings here.</p></section>
   const pages = review.pageReviews || []
   const rank = { critical:0, review:1, informational:2 }
   return <section id="document-review-results" className="civic-card civic-result-section">
     <div className="civic-section-bar"><div className="civic-eyebrow">Document review</div><div className="civic-section-heading" style={{ margin:'6px 0 0' }}><div><h2 className="civic-section-title">Page-by-page findings</h2><p className="civic-muted" style={{ fontSize:12, marginTop:5 }}>{review.reviewedPages || pages.length} pages reviewed in batches of {review.batchSize || 3}{review.usage?.totalTokens ? ` · ${review.usage.totalTokens.toLocaleString()} tokens used` : ''}</p></div><div className="civic-counts"><span className="civic-pill red">{review.counts?.red || 0} needs updates</span><span className="civic-pill amber">{review.counts?.yellow || 0} engineer review</span><span className="civic-pill green">{review.counts?.green || 0} no concern</span></div></div>{review.stoppedReason && <div className="civic-notice warning" style={{ marginTop:12 }}>{review.stoppedReason} The findings completed before the stop were saved below.</div>}</div>
+    <div style={{ padding:'0 20px 12px' }}><DownloadButtons name="Document review" onDownload={onDownload} disabled={downloading} /></div>
     <div className="civic-page-list">{pages.length ? pages.map(page => <details key={page.pageNumber} className="civic-page-detail" open={page.score !== 'green'}><summary><strong style={{ whiteSpace:'nowrap' }}>Page {page.pageNumber}</strong><span className={`civic-pill ${page.score === 'red' ? 'red' : page.score === 'green' ? 'green' : 'amber'}`}>{scoreLabels[page.score] || 'Engineer review'}</span><span className="civic-muted" style={{ fontSize:12, flex:1, minWidth:140 }}>{page.summary}</span><span className="civic-muted" style={{ fontSize:11, whiteSpace:'nowrap' }}>{page.findings?.length || 0} findings</span><Icon name="chevron" size={16} /></summary><div className="civic-findings">{page.findings?.length ? [...page.findings].sort((a,b) => (rank[a.severity] ?? 2) - (rank[b.severity] ?? 2)).map((finding,index) => <div className="civic-finding" key={`${finding.category}-${index}`}><div style={{ display:'flex', gap:8, alignItems:'center', marginBottom:7 }}><span className={`civic-pill ${finding.severity === 'critical' ? 'red' : finding.severity === 'review' ? 'amber' : ''}`}>{humanize(finding.severity || 'informational')}</span><span className="civic-eyebrow">{humanize(finding.category)}</span></div><strong style={{ fontSize:14, color:'var(--navy)' }}>{finding.finding}</strong><div className="civic-evidence-grid"><div className="civic-evidence"><div className="civic-eyebrow" style={{ marginBottom:5 }}>Proposal evidence</div>{finding.evidence || 'No evidence provided.'}</div><div className="civic-evidence action"><div className="civic-eyebrow" style={{ marginBottom:5, color:'var(--teal)' }}>Recommended action</div>{finding.recommendation || 'No action provided.'}</div></div></div>) : <p className="civic-muted" style={{ paddingTop:12, fontSize:12 }}>No specific findings were returned for this page.</p>}</div></details>) : <div className="civic-notice">No page-level findings were returned. Run the document review again to create the detailed page record.</div>}</div>
   </section>
 }
 
-function StandardsComparison({ review }) {
+function StandardsComparison({ review, onDownload, downloading }) {
   if (!review) return <section id="controlling-standards" className="civic-card civic-section-bar"><div className="civic-eyebrow">Standards comparison</div><h2 className="civic-section-title" style={{ marginTop:6 }}>State and city requirements</h2><p className="civic-muted" style={{ fontSize:12, marginTop:7 }}>Run standards comparison to see applicable requirements here.</p></section>
   const matrix = review.matrix || []
   const status = review.sourceStatus || {}
   return <section id="controlling-standards" className="civic-card civic-result-section"><div className="civic-section-bar"><div className="civic-eyebrow">Standards comparison</div><h2 className="civic-section-title" style={{ marginTop:6 }}>State and city requirements</h2><p className="civic-muted" style={{ fontSize:12, marginTop:5 }}>{(review.jurisdiction?.state || status.jurisdiction?.state || 'State')} → {(review.jurisdiction?.city || status.jurisdiction?.city || 'City')} · {(review.projectScope || []).join(', ') || 'Scope not identified'}</p><div className="civic-counts" style={{ marginTop:14 }}><span className="civic-pill">{status.stateDocumentCount || 0} state records</span><span className="civic-pill">{status.cityDocumentCount || 0} city records</span><span className="civic-pill">{status.excludedJurisdictionDocumentCount || 0} excluded</span><span className="civic-pill green">{review.summary?.pass || 0} pass</span><span className="civic-pill red">{review.summary?.fail || 0} fail</span><span className="civic-pill amber">{review.summary?.review || 0} engineer review</span></div></div>
+    <div style={{ padding:'0 20px 12px' }}><DownloadButtons name="Standards comparison" onDownload={onDownload} disabled={downloading} /></div>
     <div className="civic-standards-list">{matrix.length ? matrix.map((row,index) => <details className="civic-standard-row" key={row.id || `${row.subject}-${index}`}><summary><div><strong style={{ color:'var(--navy)', fontSize:13 }}>{row.subject || 'Requirement'}</strong><div className="civic-muted" style={{ fontSize:11, marginTop:3 }}>{row.requirement}</div></div><span className={`civic-pill ${row.result === 'pass' ? 'green' : row.result === 'fail' ? 'red' : 'amber'}`}>{row.result === 'review' ? 'Engineer review' : humanize(row.result || 'review')}</span><Icon name="chevron" size={16} /></summary><div className="fields"><Field label="City / client standard" value={row.cityStandard} /><Field label="Site-specific standard" value={row.siteRequirement} /><Field label="Proposal evidence" value={row.proposalValue} /><Field label="Controlling value" value={row.controllingValue || 'Unresolved'} /><Field label="Review reason" value={row.reason} wide /><div className="field correction"><b style={{ color:'var(--teal)' }}>Recommended correction</b>{row.recommendedCorrection || 'No correction specified.'}</div><div className="field wide"><b>Citation / source</b>{row.source ? <><strong>{row.source.title}</strong> · Page {row.source.page || 'not identified'}{row.source.excerpt && <p style={{ marginTop:6 }}>{row.source.excerpt}</p>}{row.source.url && <a href={row.source.url} target="_blank" rel="noreferrer" style={{ color:'var(--teal)', display:'inline-flex', gap:4, marginTop:6 }}>Open source <Icon name="external" size={13} /></a>}</> : 'No controlling citation'}</div></div></details>) : <div className="civic-notice">The comparison completed without returning matrix rows. Engineer review is required.</div>}</div><div style={{ padding:'14px 20px', borderTop:'1px solid var(--border)', background:'var(--subtle)', fontSize:12 }}><strong>Decision policy:</strong> {review.decisionPolicy || 'Final approval remains with the responsible engineer.'}</div>
   </section>
 }
 
 function Field({ label, value, wide = false }) { return <div className={`field ${wide ? 'wide' : ''}`}><b>{label}</b>{value || '—'}</div> }
 
-function DiagramAnalysisDetails({ analysis, fileUrl, proposalUrl }) {
+function DiagramAnalysisDetails({ analysis, fileUrl, proposalUrl, onDownload, downloading }) {
   if (!analysis) return <section id="diagram-analysis-results" className="civic-card civic-section-bar"><div className="civic-eyebrow">Diagram analysis</div><h2 className="civic-section-title" style={{ marginTop:6 }}>Visual findings</h2><p className="civic-muted" style={{ fontSize:12, marginTop:7 }}>Analyze diagrams to see visual findings here.</p></section>
   const diagrams = analysis.diagrams || []
   const overall = analysis.overallCompliance || 'yellow'
@@ -390,6 +423,7 @@ function DiagramAnalysisDetails({ analysis, fileUrl, proposalUrl }) {
       </div>
     </div>
 
+    <div style={{ padding:'0 22px 12px' }}><DownloadButtons name="Diagram analysis" onDownload={onDownload} disabled={downloading} /></div>
     {analysis.standardsChecks?.length > 0 && <div style={{ padding: '18px 22px', borderBottom: '1px solid var(--border)' }}>
       <h3 style={{ fontSize:17, marginBottom:12 }}>What the standards require</h3>
       {analysis.validationNotes?.map((note, index) => <div key={index} className="civic-notice warning" style={{ marginBottom:12 }}>{note}</div>)}

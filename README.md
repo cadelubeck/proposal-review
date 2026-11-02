@@ -135,3 +135,7 @@ the UI and health endpoint should be checked before a sales demonstration.
 # MCP PR test
 
 Municipal research loads the bundled Utah discovery catalog even when the database has not been seeded. Discovery links remain unverified. Ogden’s official 2025 Engineering Standards are supplied as a page-numbered reference snapshot (SHA-256 and retrieval metadata in `backend/catalogs/ogden-engineering-2025-reference.json`); the three review tools receive relevant source passages and must state the actual provision and cite its section/page. Publication is distinct from project incorporation and approval. Refresh the snapshot when the governing edition changes.
+
+## Downloading review results
+
+The AI Review Center offers a PDF and editable UTF-8 text download for each of the three reviews, plus a combined download containing all saved results. Reports retain findings, proposal evidence, recommended corrections, calculations, source citations, and review timestamps. Incomplete document reviews are labeled partial; reports do not alter the uploaded document. PDF generation runs in the browser from saved results.
