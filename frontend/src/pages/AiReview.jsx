@@ -392,6 +392,7 @@ function DiagramAnalysisDetails({ analysis, fileUrl, proposalUrl }) {
 
     {analysis.standardsChecks?.length > 0 && <div style={{ padding: '18px 22px', borderBottom: '1px solid var(--border)' }}>
       <h3 style={{ fontSize:17, marginBottom:12 }}>What the standards require</h3>
+      {analysis.validationNotes?.map((note, index) => <div key={index} className="civic-notice warning" style={{ marginBottom:12 }}>{note}</div>)}
       {analysis.standardsChecks.map((check, index) => <details key={`${check.subject}-${index}`} className="civic-standard-row" open>
         <summary><strong>{check.subject}</strong><span className={`civic-pill ${check.result === 'fail' ? 'red' : check.result === 'pass' ? 'green' : 'amber'}`}>{check.result === 'fail' ? 'Conflict' : check.result === 'pass' ? 'Meets requirement' : 'Engineer review'}</span></summary>
         <div className="fields">

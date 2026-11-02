@@ -12,7 +12,7 @@ const { pdfPageBatch, pdfPageCount, splitTextPages } = require('./document-pages
 const { applyCalculationAudits, buildMatrix } = require('./compliance')
 const { auditCalculations } = require('./calculation-audit')
 const { createDirectUploads } = require('./direct-upload')
-const { analysisDocuments, referenceContext, REQUIREMENT_INSTRUCTIONS } = require('./standards-reference')
+const { analysisDocuments, referenceContext, REQUIREMENT_INSTRUCTIONS, guardDiagramComparisons } = require('./standards-reference')
 const { RESEARCH_DOMAINS, buildSourceStatus, hasExplicitState, matchingDocuments, researchDocuments, resolveProposalJurisdiction } = require('./source-context')
 const { SOURCE_CATEGORIES, SOURCE_CATEGORY_KEYS, categoryDefinition, documentCategory } = require('./source-catalog')
 const { municipalities: UTAH_MUNICIPALITIES = [] } = require('./catalogs/utah-source-catalog.json')
@@ -298,7 +298,7 @@ function catalogComparisonRequest(proposal, catalogDocs, sourceStatus) {
     schema: catalogComparisonSchema,
     instructions: `${REQUIREMENT_INSTRUCTIONS} Assist a licensed civil engineer and public-procurement reviewer. Work in strict jurisdiction order: first identify applicable ${sourceStatus.jurisdiction.state} requirements, then apply only ${sourceStatus.jurisdiction.city} requirements. Do not research, cite, or apply another city, county, district, or private entity. Compare the submitted proposal only against the supplied jurisdiction-filtered sources and their directly linked official materials. Use this precedence: (1) addenda and written clarifications; (2) executed contract, special provisions, plans, and specifications; (3) solicitation and evaluation criteria; (4) the expressly incorporated municipal standards edition; (5) applicable law, permits, and funding rules; (6) adopted municipal code/plans/policies; (7) maps, portals, planning studies, and historical data. Never substitute the newest edition for the incorporated edition. Score only solicitation criteria. A pass or fail requires a proposal passage and a verified controlling requirement; otherwise return review. Extract each explicitly printed calculation as a separate calculations entry, preserving its exact arithmetic expression, named numeric operands, reported result, units, page, and short verbatim evidence. Do not infer missing operands or silently repair formulas; put unsupported operations or incomplete values in the expression/inputs so deterministic review can refer them to an engineer. If no equation or arithmetic is explicitly shown, return an empty calculations array. Treat hazards, GIS, groundwater, soils, environmental, and historical sources as screening unless confirmed by the responsible professional or agency. Never use protected-class data, political activity, personal information, restricted archaeology, or sensitive utility/security details. Every source URL must be supported by supplied official reference passages or one you actually inspected with web search.`,
     input: `PROPOSAL: ${proposal.name}\nCLIENT: ${proposal.company || ''}\nSTATE: ${sourceStatus.jurisdiction.state}\nCITY: ${sourceStatus.jurisdiction.city}\n\nPROPOSAL TEXT:\n${(proposal.text_content || '').slice(0, 150000)}\n\nSTATE SOURCES (review first):\n${JSON.stringify(stateSources)}\n\n${sourceStatus.jurisdiction.city.toUpperCase()} SOURCES (review second):\n${JSON.stringify(citySources)}\n\nOFFICIAL STANDARD PASSAGES (with original page numbers):\n${JSON.stringify(referenceContext(catalogDocs, proposal))}`,
-    maxOutputTokens: 10000,
+    maxOutputTokens: 15000,
     webSearchDomains: researchDomainsForDocuments(catalogDocs)
   }
 }
@@ -1604,7 +1604,7 @@ app.get('/api/proposals/:id/analyze-diagrams/status', async (req, res) => {
       return res.status(202).json({ status: analyzed.status, job: p.diagramAnalysisJob, sourceStatus })
     }
     const verifiedUrls = new Set([...(analyzed.sources || []).map(source => source.url), ...(sourceStatus.referenceSources || []).map(source => source.sourceUrl)])
-    p.diagramAnalysis = {
+    p.diagramAnalysis = guardDiagramComparisons({
       ...analyzed.data,
       referenceSources: p.diagramAnalysisJob.referenceSources || [],
       standardsChecks: (analyzed.data.standardsChecks || []).map(check => verifiedUrls.has(check.sourceUrl) ? check : { ...check, result: 'review', reason: `${check.reason} Source citation was not verified.` }),
@@ -1613,7 +1613,7 @@ app.get('/api/proposals/:id/analyze-diagrams/status', async (req, res) => {
       webSources: analyzed.sources || [],
       generatedAt: new Date().toISOString(),
       openai: { responseId: analyzed.responseId, model: analyzed.model, usage: analyzed.usage }
-    }
+    })
     delete p.diagramAnalysisJob
     p.updated_at = new Date().toISOString()
     await writeProposal(p.id, p)

@@ -47,6 +47,30 @@ const STOP_WORDS = new Set('this that with from have shall must will there their
 // Topic retrieval must survive that without inventing missing plan evidence.
 const TOPICS = [/bore|boring|directional/i, /vault|handhole|cabinet/i, /conduit|telecom/i, /restoration|repair/i, /traffic\s*control/i, /storm/i, /sanitary|sewer/i]
 
-const REQUIREMENT_INSTRUCTIONS = 'State the actual applicable published requirement, numeric limit and units where present, source title/edition, section and page, then compare it to the submitted evidence. Do not replace an available requirement with a generic instruction to consult or obtain the city standards. Distinguish a missing standard from missing project evidence, an unconfirmed incorporated edition, or a needed approval. Preserve exceptions and scope: for example, street-light conduit requirements must not be applied to telecommunications conduit. Supplied official reference passages are source evidence even when no structured extraction exists. Never invent a threshold or claim a published standard alone proves compliance.'
+const REQUIREMENT_INSTRUCTIONS = 'State the actual applicable published requirement, numeric limit and units where present, source title/edition, section and page, then compare it to the submitted evidence. Do not replace an available requirement with a generic instruction to consult or obtain the city standards. Distinguish a missing standard from missing project evidence, an unconfirmed incorporated edition, or a needed approval. Preserve exceptions and scope: for example, street-light conduit requirements must not be applied to telecommunications conduit. Normalize unit conventions before comparison. US engineering scale notation 1:50 may mean 1 inch = 50 feet; do not compare a converted dimensionless 1:504 from 1 inch = 42 feet with an unqualified 1:50 as though their conventions were identical. If the convention is not established, report review rather than a conflict. Missing construction/closeout records are not design violations unless they are required at the submitted project phase. Supplied official reference passages are source evidence even when no structured extraction exists. Never invent a threshold or claim a published standard alone proves compliance.'
 
-module.exports = { analysisDocuments, referenceContext, REQUIREMENT_INSTRUCTIONS }
+function guardDiagramComparisons(analysis) {
+  let corrected = false
+  const scaleNote = 'Confirm the scale convention before deciding compliance. The plan uses feet per inch while the reference uses engineering scale notation. A dimensionless conversion must not be compared directly with an unqualified engineering scale; that conversion alone does not establish a violation.'
+  const standardsChecks = (analysis.standardsChecks || []).map(check => {
+    if (check.sourceUrl === ogden.sourceUrl && /scale/i.test(check.subject) && check.result === 'fail'
+      && /inch[\s\S]*(?:feet|ft)/i.test(check.submittedEvidence) && /1\s*:\s*\d+/.test(check.requirement)) {
+      corrected = true
+      return { ...check, result: 'review', reason: scaleNote }
+    }
+    return check
+  })
+  if (!corrected) return analysis
+  return {
+    ...analysis, standardsChecks,
+    summary: analysis.summary?.replace(/noncompliant or ambiguous scale/gi, 'unconfirmed scale convention'),
+    criticalIssues: (analysis.criticalIssues || []).map(issue => /scale/i.test(issue) ? scaleNote : issue),
+    diagrams: (analysis.diagrams || []).map(diagram => ({ ...diagram,
+      concerns: (diagram.concerns || []).map(concern => /scale/i.test(concern) ? scaleNote : concern),
+      missingElements: (diagram.missingElements || []).map(item => /scale/i.test(item) ? 'Confirmation of the scale convention and drawing legibility' : item)
+    })),
+    validationNotes: [...(analysis.validationNotes || []), 'A mixed-unit scale comparison was changed to engineer review; no scale conflict is established by that conversion.']
+  }
+}
+
+module.exports = { analysisDocuments, referenceContext, REQUIREMENT_INSTRUCTIONS, guardDiagramComparisons }

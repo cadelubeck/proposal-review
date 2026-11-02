@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict')
-const { analysisDocuments, referenceContext } = require('./standards-reference')
+const { analysisDocuments, referenceContext, guardDiagramComparisons } = require('./standards-reference')
 const { researchDocuments, buildSourceStatus } = require('./source-context')
 
 const proposal = { location: 'Ogden, UT', name: 'Conduit and Vaults', text_content: 'Directional bore for telecommunications conduit. Minimum cover, utility offsets, equipment locations, permits and restoration.' }
@@ -28,4 +28,8 @@ const dense = referenceContext(selected, { ...proposal, text_content: selected.f
 assert.ok(dense[0].pages.some(page=>page.page === 84), 'A tight budget must retain the directly relevant bore chapter ahead of generic earlier pages')
 const joined = referenceContext(selected, { ...proposal, text_content: 'AdditionalPlanNotes: Above-groundutilitiesmaybelocatedintheborepath;increasingtheboredepth. Conduit and Vaults Overview' }, { maxPages:5, maxChars:16000 })
 for (const page of [83,84,85,86]) assert.ok(joined[0].pages.some(item=>item.page === page), `Joined PDF words must still retrieve bore page ${page}`)
+const invalidScale = guardDiagramComparisons({ summary:'noncompliant or ambiguous scale', standardsChecks:[{subject:'Drawing scale',result:'fail',sourceUrl:references[0].url,requirement:'Maximum scale 1:50',submittedEvidence:'Scale 1 inch : 42 feet',reason:'1:504 exceeds 1:50'}], criticalIssues:['Scale is 1:504, a conflict'], diagrams:[{concerns:['Scale conflict'],missingElements:['Compliant scale']}] })
+assert.equal(invalidScale.standardsChecks[0].result, 'review')
+assert.ok(!invalidScale.criticalIssues.join().includes('1:504'))
+assert.equal(invalidScale.summary, 'unconfirmed scale convention')
 console.log('Official standards: unseeded catalog, exact city, cited page retrieval, scope isolation and prompt bounds: ok')
