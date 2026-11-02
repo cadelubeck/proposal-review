@@ -199,8 +199,8 @@ export default function Dashboard() {
                 <div style={{ fontWeight: 700, fontSize: 13.5, color: '#14324a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</div>
                 <div style={{ fontSize: 11, color: '#66717d', marginTop: 2, display: 'flex', alignItems: 'center', gap: 6 }}>
                   {p.company && <span style={{ color: '#66717d' }}>{p.company}</span>}
-                  {p.company && p.location && <span>·</span>}
-                  {p.location && <span>{p.location}</span>}
+                  {p.company && (p.location || p.postalCode) && <span>·</span>}
+                  {(p.location || p.postalCode) && <span>{[p.location, p.postalCode].filter(Boolean).join(' ')}</span>}
                   {p.assignedTo && <><span>·</span><span>{p.assignedTo}</span></>}
                 </div>
               </div>

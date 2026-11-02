@@ -246,8 +246,8 @@ export default function Viewer() {
 
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 800, fontSize: 15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', letterSpacing: -0.3 }}>{proposal.name}</div>
-          {(proposal.company || proposal.location) && (
-            <div style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>{[proposal.company, proposal.location].filter(Boolean).join(' · ')}</div>
+          {(proposal.company || proposal.location || proposal.postalCode) && (
+            <div style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>{[proposal.company, [proposal.location, proposal.postalCode].filter(Boolean).join(' ')].filter(Boolean).join(' · ')}</div>
           )}
         </div>
 

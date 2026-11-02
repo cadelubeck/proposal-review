@@ -1,0 +1,16 @@
+# Isolated account environments are launched by the supplied Open scripts.
+[mcp_servers.supabase]
+enabled = true
+url = "https://mcp.supabase.com/mcp?project_ref=xfqifuilriloqkvpxppw"
+
+[mcp_servers.supabase_stc_ro]
+enabled = false
+
+[mcp_servers.vercel]
+enabled = true
+
+[mcp_servers.stripe]
+enabled = false
+
+[mcp_servers.analytics-mcp]
+enabled = false

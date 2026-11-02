@@ -50,10 +50,21 @@ async function supabaseRequest(route, options = {}) {
 }
 
 async function listRecords(kind, companyId) {
-  const query = new URLSearchParams({ select: 'data', kind: `eq.${kind}`, order: 'updated_at.asc' })
-  if (companyId !== undefined) query.set('company_id', `eq.${companyId}`)
-  const rows = await supabaseRequest(`/rest/v1/app_records?${query}`)
-  return rows.map(row => row.data)
+  const pageSize = 1000
+  const records = []
+  for (let offset = 0; ; offset += pageSize) {
+    const query = new URLSearchParams({
+      select: 'data',
+      kind: `eq.${kind}`,
+      order: 'updated_at.asc,id.asc',
+      limit: String(pageSize),
+      offset: String(offset)
+    })
+    if (companyId !== undefined) query.set('company_id', `eq.${companyId}`)
+    const rows = await supabaseRequest(`/rest/v1/app_records?${query}`)
+    records.push(...rows.map(row => row.data))
+    if (rows.length < pageSize) return records
+  }
 }
 
 async function getRecord(kind, id) {
@@ -78,12 +89,18 @@ async function deleteRecord(kind, id) {
 async function replaceRecords(kind, values, companyId) {
   const existing = await listRecords(kind, companyId)
   const retained = new Set(values.map(value => value.id))
-  await Promise.all(values.map(value => upsertRecord(kind, value.id, companyId === undefined ? value.companyId : companyId, value)))
-  await Promise.all(existing.filter(value => !retained.has(value.id)).map(value => deleteRecord(kind, value.id)))
+  for (let offset = 0; offset < values.length; offset += 50) {
+    const batch = values.slice(offset, offset + 50)
+    await Promise.all(batch.map(value => upsertRecord(kind, value.id, companyId === undefined ? value.companyId : companyId, value)))
+  }
+  const removed = existing.filter(value => !retained.has(value.id))
+  for (let offset = 0; offset < removed.length; offset += 50) {
+    await Promise.all(removed.slice(offset, offset + 50).map(value => deleteRecord(kind, value.id)))
+  }
 }
 
 function proposalSummary(proposal) {
-  const fields = ['id', 'name', 'company', 'location', 'status', 'companyId', 'created_at', 'updated_at', 'assignedTo', 'assignedToId', 'dueDate', 'priority']
+  const fields = ['id', 'name', 'company', 'location', 'postalCode', 'status', 'companyId', 'created_at', 'updated_at', 'assignedTo', 'assignedToId', 'dueDate', 'priority']
   return Object.fromEntries(fields.filter(field => proposal[field] !== undefined).map(field => [field, proposal[field]]))
 }
 

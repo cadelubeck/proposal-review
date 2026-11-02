@@ -1,8 +1,10 @@
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
+const { SOURCE_CATEGORY_KEYS } = require('./source-catalog')
 
-const CATALOG_VERSION = '2026-08-26'
+const CATALOG_VERSION = '2026-11-01'
+const MARKDOWN_LINK = /\[([^\]]+)\]\(\s*<?(https?:\/\/[^)>]+)>?\s*\)/g
 
 function plainText(value) {
   return value
@@ -80,6 +82,147 @@ function documentStatus(title) {
   return 'unknown'
 }
 
+function markdownLinks(value) {
+  return [...value.matchAll(MARKDOWN_LINK)].map(match => ({
+    title: plainText(match[1]),
+    url: match[2]
+  }))
+}
+
+function validHttpUrl(value) {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+function publisherFor(value) {
+  if (!validHttpUrl(value)) return null
+  return new URL(value).hostname.replace(/^www\./, '')
+}
+
+function parseCategories(value) {
+  return value
+    .split(',')
+    .map(item => item.trim().replace(/\..*$/, ''))
+    .filter(item => SOURCE_CATEGORY_KEYS.includes(item))
+}
+
+function parseMunicipalityInventory(markdown) {
+  const municipalities = []
+  const records = []
+  let inSection = false
+  let municipality = null
+
+  for (const line of markdown.split(/\r?\n/)) {
+    if (line.startsWith('## ')) {
+      if (municipality) municipalities.push(municipality)
+      municipality = null
+      inSection = /^## 8\./.test(line)
+      continue
+    }
+    if (!inSection) continue
+
+    if (line.startsWith('### ')) {
+      if (municipality) municipalities.push(municipality)
+      municipality = {
+        name: line.slice(4).trim(),
+        state: 'Utah',
+        counties: [],
+        placeFips: null,
+        baselineRecords: 0,
+        officialSourceUrl: null,
+        categoriesWithSources: [],
+        categoriesWithoutSources: [],
+        resourceLinkCount: 0,
+        sourceInventoryStatus: 'unverified'
+      }
+      continue
+    }
+    if (!municipality) continue
+
+    const metadata = line.match(/State:\s*([^.]+)\.\s*Nation:[^.]+\.\s*Counties:\s*([^.]+)\.\s*Boundary-layer place FIPS:\s*`([^`]+)`[^.]*\.\s*Baseline records:\s*(\d+)\./)
+    if (metadata) {
+      municipality.state = metadata[1].trim()
+      municipality.counties = metadata[2].split(',').map(value => value.trim()).filter(Boolean)
+      municipality.placeFips = metadata[3].trim()
+      municipality.baselineRecords = Number(metadata[4])
+      continue
+    }
+
+    if (line.startsWith('Starting source:')) {
+      municipality.officialSourceUrl = markdownLinks(line)[0]?.url ?? null
+      continue
+    }
+
+    const withSources = line.match(/^Categories with discovery links:\s*(.+)\.$/)
+    if (withSources) {
+      municipality.categoriesWithSources = parseCategories(withSources[1])
+      continue
+    }
+
+    const withoutSources = line.match(/^Categories without a city-specific link in this inventory:\s*(.+)\.$/)
+    if (withoutSources) {
+      municipality.categoriesWithoutSources = parseCategories(withoutSources[1])
+      continue
+    }
+
+    if (!line.startsWith('|')) continue
+    const rawCells = line.split('|').slice(1, -1)
+    const cells = rawCells.map(plainText)
+    if (cells.length < 5 || !SOURCE_CATEGORY_KEYS.includes(cells[0])) continue
+    const exactSource = markdownLinks(rawCells[2] || '')
+    const source = exactSource[0]
+    if (!source) continue
+
+    const discoveredFrom = markdownLinks(rawCells[3] || '')[0]?.url ?? null
+    const sourceCategory = cells[0]
+    const title = cells[1]
+    const accessCheck = cells[4]
+    const jurisdiction = `${municipality.name}, Utah`
+    const id = stableId(source.url, sourceCategory, jurisdiction)
+    const sourceUrl = validHttpUrl(source.url) ? source.url : null
+    const sourceAccessCheck = sourceUrl
+      ? accessCheck
+      : `Invalid URL recorded in inventory: ${source.url}. ${accessCheck}`
+    records.push({
+      id,
+      title: `${municipality.name} — ${title}`,
+      documentType: /\.pdf(?:$|[?#])/i.test(source.url) ? 'published_document' : 'authoritative_portal',
+      sourceCategory,
+      jurisdiction,
+      counties: municipality.counties,
+      client: '',
+      projectTypes: [],
+      sourceUrl,
+      reportedUrl: sourceUrl ? undefined : source.url,
+      publisher: publisherFor(source.url),
+      authorityLevel: 'screening',
+      documentStatus: 'unknown',
+      catalogScope: 'municipal',
+      catalogSection: 'Utah municipal source inventory',
+      discoveryStatus: 'unverified',
+      discoveredFrom,
+      accessCheck: sourceAccessCheck,
+      notes: `Discovery record only. ${sourceAccessCheck} Adoption, current status, project applicability, and requirements have not been verified.`,
+      visibility: 'shared',
+      sensitivity: 'public',
+      requirements: [],
+      extractionStatus: 'url_only',
+      retrievedAt: `${CATALOG_VERSION}T00:00:00.000Z`,
+      createdAt: `${CATALOG_VERSION}T00:00:00.000Z`,
+      createdById: 'system-catalog-import',
+      health: { status: 'unchecked', checkedAt: null, changed: false }
+    })
+    municipality.resourceLinkCount += 1
+  }
+
+  if (municipality) municipalities.push(municipality)
+  return { municipalities, records }
+}
+
 function parseCatalogMarkdown(markdown) {
   const lines = markdown.split(/\r?\n/)
   const records = []
@@ -99,18 +242,19 @@ function parseCatalogMarkdown(markdown) {
       if (sectionNumber.startsWith('2.')) section = context
       continue
     }
+    if (sectionNumber.startsWith('8.')) continue
     if (!line.includes('](')) continue
 
     const cells = line.startsWith('|') ? line.split('|').map(plainText).filter(Boolean) : []
     const need = cells[0] && cells[0] !== 'Need' ? cells[0] : ''
     const guidance = cells.length >= 3 ? cells[cells.length - 1] : ''
-    for (const match of line.matchAll(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g)) {
-      const linkTitle = plainText(match[1])
+    for (const match of markdownLinks(line)) {
+      const linkTitle = match.title
       const displayTitle = sectionNumber.startsWith('4.') || sectionNumber.startsWith('5.')
         ? `${context} — ${linkTitle}`
         : linkTitle
       const category = categoryFor(section, `${linkTitle} ${need}`, sectionNumber.startsWith('4.') || sectionNumber.startsWith('5.') ? context : '')
-      const url = match[2]
+      const url = match.url
       const notes = [need, guidance, sectionNumber.startsWith('4.') || sectionNumber.startsWith('5.') ? plainText(line) : '']
         .filter(Boolean).filter((item, index, items) => items.indexOf(item) === index).join(' — ')
       records.push({
@@ -121,12 +265,14 @@ function parseCatalogMarkdown(markdown) {
         jurisdiction: jurisdictionFor(sectionNumber, context, displayTitle, url),
         client: '',
         projectTypes: [],
-        sourceUrl: url,
-        publisher: new URL(url).hostname.replace(/^www\./, ''),
+        sourceUrl: validHttpUrl(url) ? url : null,
+        reportedUrl: validHttpUrl(url) ? undefined : url,
+        publisher: publisherFor(url),
         authorityLevel: authorityLevel(displayTitle, url),
         documentStatus: documentStatus(displayTitle),
         catalogScope: sectionNumber.startsWith('5.') ? 'project' : sectionNumber.startsWith('4.') ? 'municipal' : 'statewide',
         catalogSection: section || sectionNumber,
+        discoveryStatus: 'unverified',
         notes,
         visibility: 'shared',
         sensitivity: 'public',
@@ -140,6 +286,7 @@ function parseCatalogMarkdown(markdown) {
     }
   }
 
+  records.push(...parseMunicipalityInventory(markdown).records)
   const byKey = new Map()
   for (const record of records) {
     const key = `${record.sourceUrl}|${record.sourceCategory}|${record.jurisdiction}`
@@ -154,12 +301,20 @@ function main() {
   const inputPath = process.argv[2]
   const outputPath = process.argv[3] || path.join(__dirname, 'catalogs', 'utah-source-catalog.json')
   if (!inputPath) throw new Error('Usage: node catalog-import.js <catalog.md> [output.json]')
-  const records = parseCatalogMarkdown(fs.readFileSync(path.resolve(inputPath), 'utf8'))
+  const markdown = fs.readFileSync(path.resolve(inputPath), 'utf8')
+  const records = parseCatalogMarkdown(markdown)
+  const { municipalities } = parseMunicipalityInventory(markdown)
   fs.mkdirSync(path.dirname(path.resolve(outputPath)), { recursive: true })
-  fs.writeFileSync(path.resolve(outputPath), `${JSON.stringify({ version: CATALOG_VERSION, sourceCount: records.length, records }, null, 2)}\n`)
-  console.log(`Wrote ${records.length} governed sources to ${outputPath}`)
+  fs.writeFileSync(path.resolve(outputPath), `${JSON.stringify({
+    version: CATALOG_VERSION,
+    sourceCount: records.length,
+    municipalityCount: municipalities.length,
+    municipalities,
+    records
+  }, null, 2)}\n`)
+  console.log(`Wrote ${records.length} source records and ${municipalities.length} municipalities to ${outputPath}`)
 }
 
 if (require.main === module) main()
 
-module.exports = { categoryFor, parseCatalogMarkdown }
+module.exports = { categoryFor, parseCatalogMarkdown, parseMunicipalityInventory }

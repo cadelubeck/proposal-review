@@ -1,4 +1,5 @@
 const { SOURCE_CATEGORIES, documentCategory } = require('./source-catalog')
+const { municipalities: UTAH_MUNICIPALITIES = [] } = require('./catalogs/utah-source-catalog.json')
 
 const RESEARCH_DOMAINS = [
   'usgs.gov',
@@ -47,6 +48,25 @@ function stateFrom(value) {
   return null
 }
 
+function hasExplicitState(value) {
+  return stateFrom(value) !== null
+}
+
+function localName(value) {
+  return normalized(value)
+    .replace(/\butah\b/g, ' ')
+    .replace(/\b\d{5}(?:\s+\d{4})?\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function exactMunicipalityMatch(proposalLocation, jurisdiction) {
+  const expected = localName(jurisdiction)
+  if (!expected) return false
+  const segments = String(proposalLocation || '').split(/[,;]/).map(localName).filter(Boolean)
+  return localName(proposalLocation) === expected || segments.includes(expected)
+}
+
 function locationMatches(proposalLocation, sourceJurisdiction) {
   if (!sourceJurisdiction) return true
   const proposal = normalized(proposalLocation)
@@ -75,19 +95,26 @@ function matchesProposal(doc, proposal) {
 }
 
 function municipalJurisdictions(documents) {
-  return [...new Set(documents
+  return [...new Set([
+    ...documents
     .filter(doc => ['municipal', 'project'].includes(doc.catalogScope) || /\bcity\b/i.test(doc.jurisdiction || ''))
     .map(doc => String(doc.jurisdiction || '').trim())
-    .filter(value => value && !/\b(county|district|company)\b/i.test(value)))]
+    .filter(value => value && !/\b(county|district|company)\b/i.test(value)),
+    ...UTAH_MUNICIPALITIES.map(municipality => `${municipality.name}, ${municipality.state}`)
+  ])]
 }
 
 function resolveProposalJurisdiction(documents, proposal) {
   const location = String(proposal?.location || '').trim()
   const localLocation = normalized(location).replace(/\butah\b/g, '').trim()
-  const candidates = municipalJurisdictions(documents)
+  const jurisdictions = municipalJurisdictions(documents)
+  const exactCandidates = jurisdictions.filter(jurisdiction => exactMunicipalityMatch(location, jurisdiction))
+  const candidates = (exactCandidates.length
+    ? exactCandidates
+    : stateFrom(location) === 'Utah' ? [] : jurisdictions)
     .filter(jurisdiction => {
       const localJurisdiction = normalized(jurisdiction).replace(/\butah\b/g, '').trim()
-      return localLocation && locationMatches(localLocation, localJurisdiction)
+      return localLocation && (exactCandidates.length || locationMatches(localLocation, localJurisdiction))
     })
     .sort((a, b) => {
       const aHasState = stateFrom(a) ? 1 : 0
@@ -115,7 +142,7 @@ function jurisdictionTier(doc, jurisdiction) {
   const state = normalized(jurisdiction.state)
   if (source === state || source === `state of ${state}`) return 'state'
   if (/\b(county|district|company)\b/i.test(doc.jurisdiction)) return null
-  if (locationMatches(`${jurisdiction.city}, ${jurisdiction.state}`, doc.jurisdiction)) return 'city'
+  if (exactMunicipalityMatch(`${jurisdiction.city}, ${jurisdiction.state}`, doc.jurisdiction)) return 'city'
   return null
 }
 
@@ -207,4 +234,4 @@ function buildSourceStatus(allDocuments, proposal) {
   }
 }
 
-module.exports = { RESEARCH_DOMAINS, buildSourceStatus, clientMatches, jurisdictionDocuments, jurisdictionTier, locationMatches, matchingDocuments, matchesProposal, researchDocuments, resolveProposalJurisdiction, sourceCoverage }
+module.exports = { RESEARCH_DOMAINS, buildSourceStatus, clientMatches, hasExplicitState, jurisdictionDocuments, jurisdictionTier, locationMatches, matchingDocuments, matchesProposal, researchDocuments, resolveProposalJurisdiction, sourceCoverage }

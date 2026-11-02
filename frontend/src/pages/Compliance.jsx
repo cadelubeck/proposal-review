@@ -52,10 +52,11 @@ export default function Compliance() {
   useEffect(() => { load() }, [id])
   if (!proposal) return null
   const review = proposal.complianceReview
+  const calculations = review?.calculations || []
   return <div style={{ minHeight: '100vh', background: '#f1f5f9' }}>
     <header style={{ height: 60, background: '#0f172a', color: 'white', display: 'flex', alignItems: 'center', padding: '0 24px', gap: 14 }}>
       <button onClick={() => nav(`/proposal/${id}`)} style={button}>← Proposal</button>
-      <div style={{ flex: 1 }}><div style={{ fontWeight: 800 }}>Controlling Standards Review</div><div style={{ fontSize: 10, color: '#a5b4fc' }}>{proposal.name} · {proposal.location}</div></div>
+      <div style={{ flex: 1 }}><div style={{ fontWeight: 800 }}>Controlling Standards Review</div><div style={{ fontSize: 10, color: '#a5b4fc' }}>{proposal.name} · {[proposal.location, proposal.postalCode].filter(Boolean).join(' ')}</div></div>
       <button onClick={() => nav('/standards')} style={button}>Document library</button>
       <button onClick={() => nav(`/proposal/${id}/ai-review`)} title="All AI actions run from one place." style={{ ...button, background: '#4f46e5', color: 'white' }}>✦ AI Review Center</button>
     </header>
@@ -69,11 +70,33 @@ export default function Compliance() {
           <div style={card}><div style={label}>Detected scope</div><div style={{ fontWeight: 700, marginTop: 8 }}>{review.projectScope.join(', ') || 'Not identified'}</div><div style={{ fontSize: 12, color: '#64748b', marginTop: 7 }}>{review.jurisdiction.city || ''} {review.jurisdiction.state || ''} · confidence {Math.round(review.jurisdiction.confidence * 100)}%</div></div>
           {[['Pass', review.summary.pass, '#15803d'], ['Fail', review.summary.fail, '#dc2626'], ['Engineer review', review.summary.review, '#a16207']].map(([t,n,c]) => <div style={card} key={t}><div style={{ ...label, color: c }}>{t}</div><div style={{ fontSize: 30, fontWeight: 850, color: c, marginTop: 8 }}>{n}</div></div>)}
         </div>
+        <section style={{ ...card, marginBottom: 16 }} aria-labelledby="calculation-audit-heading">
+          <h2 id="calculation-audit-heading" style={{ fontSize: 17, margin: '0 0 6px' }}>Calculation audit</h2>
+          <p style={{ color: '#64748b', fontSize: 12, margin: '0 0 14px' }}>Explicit arithmetic is recomputed from extracted operands. This does not verify units, dimensions, engineering assumptions, or whether the equation is appropriate.</p>
+          {calculations.length ? <div style={{ display: 'grid', gap: 10 }}>
+            {calculations.map(item => {
+              const statusColor = item.status === 'verified' ? '#15803d' : item.status === 'mismatch' ? '#dc2626' : '#a16207'
+              return <article key={item.id} style={{ border: `1px solid ${statusColor}35`, borderRadius: 9, padding: 12, background: `${statusColor}08` }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <strong>{item.subject || 'Calculation'}</strong>
+                  <span style={{ color: statusColor, fontWeight: 800, fontSize: 11 }}>{item.status === 'verified' ? 'ARITHMETIC VERIFIED' : item.status === 'mismatch' ? 'ARITHMETIC MISMATCH' : 'ENGINEER REVIEW'}</span>
+                </div>
+                <div style={{ fontFamily: 'monospace', fontSize: 12, marginTop: 7 }}>{item.expression || 'No supported expression'}</div>
+                <div style={{ fontSize: 12, marginTop: 6 }}>Reported: {item.reportedValue ?? 'Not provided'} {item.unit || ''} · Recomputed: {item.calculatedValue ?? 'Not available'} {item.unit || ''}</div>
+                <div style={{ fontSize: 12, marginTop: 5 }}>{item.reason}</div>
+                {item.evidence && <div style={{ fontSize: 11, color: '#64748b', marginTop: 5 }}>Evidence{item.page ? ` · page ${item.page}` : ''}: “{item.evidence}”</div>}
+                <div style={{ fontSize: 11, color: '#92400e', marginTop: 6 }}>{item.unitReview}</div>
+              </article>
+            })}
+          </div> : <div role="note" style={{ padding: 12, borderRadius: 8, background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', fontSize: 12 }}>
+            No explicit calculations were extracted for deterministic checking. This is not confirmation that the submission has no calculations; the engineer must check the source pages, equations, and units.
+          </div>}
+        </section>
         <div style={{ ...card, overflowX: 'auto', padding: 0 }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead><tr>{['Requirement','City / client','Site-specific','Proposal','Controlling','Result','Reason & correction','Citation'].map(x => <th key={x} style={th}>{x}</th>)}</tr></thead>
             <tbody>{review.matrix.map(row => <tr key={row.id}>
-              <td style={td}><b>{row.subject}</b><div style={{ color: '#64748b' }}>{row.requirement}</div></td>
+              <td style={td}><b>{row.subject}</b><div style={{ color: '#64748b' }}>{row.requirement}</div>{row.calculationCheck && <div style={{ color: row.calculationCheck.status === 'mismatch' ? '#dc2626' : row.calculationCheck.status === 'verified' ? '#15803d' : '#a16207', fontWeight: 750, marginTop: 4 }}>Arithmetic: {row.calculationCheck.status}</div>}</td>
               <td style={td}>{row.cityStandard || '—'}</td><td style={td}>{row.siteRequirement || '—'}</td><td style={td}>{row.proposalValue}</td><td style={td}><b>{row.controllingValue || 'Unresolved'}</b></td>
               <td style={td}><span style={{ padding: '4px 8px', borderRadius: 20, fontWeight: 800, color: colors[row.result], background: `${colors[row.result]}14` }}>{row.result.toUpperCase()}</span></td>
               <td style={td}>{row.reason}<div style={{ color: '#7c3aed', marginTop: 4 }}>{row.recommendedCorrection}</div></td>

@@ -9,9 +9,11 @@ const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const { aiConfiguration, cancelBackgroundResponse, checkConnection, retrieveBackgroundStructuredResponse, startBackgroundStructuredResponse, structuredResponse, embedTexts } = require('./openai')
 const { pdfPageBatch, pdfPageCount, splitTextPages } = require('./document-pages')
-const { buildMatrix } = require('./compliance')
-const { RESEARCH_DOMAINS, buildSourceStatus, matchingDocuments, researchDocuments } = require('./source-context')
+const { applyCalculationAudits, buildMatrix } = require('./compliance')
+const { auditCalculations } = require('./calculation-audit')
+const { RESEARCH_DOMAINS, buildSourceStatus, hasExplicitState, matchingDocuments, researchDocuments, resolveProposalJurisdiction } = require('./source-context')
 const { SOURCE_CATEGORIES, SOURCE_CATEGORY_KEYS, categoryDefinition, documentCategory } = require('./source-catalog')
+const { municipalities: UTAH_MUNICIPALITIES = [] } = require('./catalogs/utah-source-catalog.json')
 const { checkSourceUrl, mergeHealth } = require('./source-health')
 const {
   configuration: passwordResetConfiguration,
@@ -159,9 +161,42 @@ const requirementSchema = {
   }
 }
 
+const calculationListSchema = {
+  type: 'array',
+  items: {
+    type: 'object', additionalProperties: false,
+    required: ['subject', 'expression', 'inputs', 'reportedResult', 'unit', 'page', 'evidence'],
+    properties: {
+      subject: { type: 'string' },
+      expression: { type: 'string' },
+      inputs: {
+        type: 'array',
+        items: {
+          type: 'object', additionalProperties: false,
+          required: ['name', 'value', 'unit', 'evidence'],
+          properties: {
+            name: { type: 'string' }, value: { type: ['number', 'string', 'null'] },
+            unit: { type: ['string', 'null'] }, evidence: { type: 'string' }
+          }
+        }
+      },
+      reportedResult: { type: ['number', 'string', 'null'] },
+      unit: { type: ['string', 'null'] },
+      page: { type: ['integer', 'null'] },
+      evidence: { type: 'string' }
+    }
+  }
+}
+
+const proposalReviewSchema = {
+  ...requirementSchema,
+  required: [...requirementSchema.required, 'calculations'],
+  properties: { ...requirementSchema.properties, calculations: calculationListSchema }
+}
+
 const catalogComparisonSchema = {
   type: 'object', additionalProperties: false,
-  required: ['jurisdiction', 'projectScope', 'matrix', 'missingSources'],
+  required: ['jurisdiction', 'projectScope', 'matrix', 'missingSources', 'calculations'],
   properties: {
     jurisdiction: requirementSchema.properties.jurisdiction,
     projectScope: requirementSchema.properties.projectScope,
@@ -169,7 +204,8 @@ const catalogComparisonSchema = {
       subject: { type: 'string' }, requirement: { type: 'string' }, cityStandard: { type: ['string', 'null'] }, siteRequirement: { type: ['string', 'null'] }, proposalValue: { type: ['string', 'null'] }, controllingValue: { type: ['string', 'null'] }, result: { type: 'string', enum: ['pass', 'fail', 'review'] }, reason: { type: 'string' }, recommendedCorrection: { type: 'string' },
       source: { type: ['object', 'null'], additionalProperties: false, required: ['title', 'url', 'page', 'excerpt', 'authorityLevel', 'documentStatus'], properties: { title: { type: 'string' }, url: { type: 'string' }, page: { type: ['integer', 'null'] }, excerpt: { type: 'string' }, authorityLevel: { type: 'string' }, documentStatus: { type: 'string' } } }
     }}},
-    missingSources: { type: 'array', items: { type: 'string' } }
+    missingSources: { type: 'array', items: { type: 'string' } },
+    calculations: calculationListSchema
   }
 }
 
@@ -239,7 +275,7 @@ function catalogComparisonRequest(proposal, catalogDocs, sourceStatus) {
   return {
     name: 'catalog_standards_comparison',
     schema: catalogComparisonSchema,
-    instructions: `Assist a licensed civil engineer and public-procurement reviewer. Work in strict jurisdiction order: first identify applicable ${sourceStatus.jurisdiction.state} requirements, then apply only ${sourceStatus.jurisdiction.city} requirements. Do not research, cite, or apply another city, county, district, or private entity. Compare the submitted proposal only against the supplied jurisdiction-filtered sources and their directly linked official materials. Use this precedence: (1) addenda and written clarifications; (2) executed contract, special provisions, plans, and specifications; (3) solicitation and evaluation criteria; (4) the expressly incorporated municipal standards edition; (5) applicable law, permits, and funding rules; (6) adopted municipal code/plans/policies; (7) maps, portals, planning studies, and historical data. Never substitute the newest edition for the incorporated edition. Score only solicitation criteria. A pass or fail requires a proposal passage and a verified controlling requirement; otherwise return review. Treat hazards, GIS, groundwater, soils, environmental, and historical sources as screening unless confirmed by the responsible professional or agency. Never use protected-class data, political activity, personal information, restricted archaeology, or sensitive utility/security details. Every source URL must be one you actually inspected with web search.`,
+    instructions: `Assist a licensed civil engineer and public-procurement reviewer. Work in strict jurisdiction order: first identify applicable ${sourceStatus.jurisdiction.state} requirements, then apply only ${sourceStatus.jurisdiction.city} requirements. Do not research, cite, or apply another city, county, district, or private entity. Compare the submitted proposal only against the supplied jurisdiction-filtered sources and their directly linked official materials. Use this precedence: (1) addenda and written clarifications; (2) executed contract, special provisions, plans, and specifications; (3) solicitation and evaluation criteria; (4) the expressly incorporated municipal standards edition; (5) applicable law, permits, and funding rules; (6) adopted municipal code/plans/policies; (7) maps, portals, planning studies, and historical data. Never substitute the newest edition for the incorporated edition. Score only solicitation criteria. A pass or fail requires a proposal passage and a verified controlling requirement; otherwise return review. Extract each explicitly printed calculation as a separate calculations entry, preserving its exact arithmetic expression, named numeric operands, reported result, units, page, and short verbatim evidence. Do not infer missing operands or silently repair formulas; put unsupported operations or incomplete values in the expression/inputs so deterministic review can refer them to an engineer. If no equation or arithmetic is explicitly shown, return an empty calculations array. Treat hazards, GIS, groundwater, soils, environmental, and historical sources as screening unless confirmed by the responsible professional or agency. Never use protected-class data, political activity, personal information, restricted archaeology, or sensitive utility/security details. Every source URL must be one you actually inspected with web search.`,
     input: `PROPOSAL: ${proposal.name}\nCLIENT: ${proposal.company || ''}\nSTATE: ${sourceStatus.jurisdiction.state}\nCITY: ${sourceStatus.jurisdiction.city}\n\nPROPOSAL TEXT:\n${(proposal.text_content || '').slice(0, 150000)}\n\nSTATE SOURCES (review first):\n${JSON.stringify(stateSources)}\n\n${sourceStatus.jurisdiction.city.toUpperCase()} SOURCES (review second):\n${JSON.stringify(citySources)}`,
     maxOutputTokens: 10000,
     webSearchDomains: researchDomainsForDocuments(catalogDocs)
@@ -248,7 +284,7 @@ function catalogComparisonRequest(proposal, catalogDocs, sourceStatus) {
 
 function completedCatalogReview(researched, sourceStatus) {
   const verifiedUrls = new Set(researched.sources.map(source => source.url))
-  const matrix = researched.data.matrix.map((row, index) => {
+  const verifiedMatrix = researched.data.matrix.map((row, index) => {
     const sourceVerified = !row.source || verifiedUrls.has(row.source.url)
     return {
       id: `catalog-${index + 1}`,
@@ -258,8 +294,10 @@ function completedCatalogReview(researched, sourceStatus) {
       source: sourceVerified ? row.source : null
     }
   })
+  const calculations = auditCalculations(researched.data.calculations)
+  const matrix = applyCalculationAudits(verifiedMatrix, calculations)
   const summary = { pass: matrix.filter(row => row.result === 'pass').length, fail: matrix.filter(row => row.result === 'fail').length, review: matrix.filter(row => row.result === 'review').length }
-  return { ...researched.data, matrix, summary, sourceStatus, matchedDocumentIds: [], webSources: researched.sources, generatedAt: new Date().toISOString(), openai: { responseId: researched.responseId, model: researched.model }, decisionPolicy: `Jurisdiction-filtered catalog screening: ${sourceStatus.jurisdiction.state} first, then ${sourceStatus.jurisdiction.city}; other cities and counties excluded. Only verified, project-applicable controlling sources may support pass/fail. Final approval remains with the responsible engineer.` }
+  return { ...researched.data, calculations, matrix, summary, sourceStatus, matchedDocumentIds: [], webSources: researched.sources, generatedAt: new Date().toISOString(), openai: { responseId: researched.responseId, model: researched.model }, decisionPolicy: `Jurisdiction-filtered catalog screening: ${sourceStatus.jurisdiction.state} first, then ${sourceStatus.jurisdiction.city}; other cities and counties excluded. Only verified, project-applicable controlling sources may support pass/fail. Arithmetic is independently recomputed when explicit operands are available; units and engineering applicability still require professional verification. Final approval remains with the responsible engineer.` }
 }
 
 function activeAiOperation(proposal) {
@@ -326,7 +364,7 @@ function pageReviewRequest(proposal, pages, sourceStatus, matchedDocs, catalogDo
   return {
     name: 'proposal_page_review',
     schema: pageReviewSchema,
-    instructions: `Assist a licensed civil engineer and public-procurement reviewer. Review only the supplied three-page-or-smaller batch. Report a page separately for every supplied page number. Use the proposal text as evidence and use only the supplied extracted requirements as controlling standards. Catalog links are discovery context only and cannot support pass/fail unless an extracted requirement is supplied. Work in strict jurisdiction order: ${sourceStatus.jurisdiction.state} first, then ${sourceStatus.jurisdiction.city}; never apply another city, county, district, or private entity. Use green only when no concern is visible, yellow whenever a professional check or missing source is needed, and red only for a clear material conflict supported by quoted proposal evidence. Do not invent values, drawings, citations, or visible content. An empty/image-only page must be yellow and referred to diagram analysis. Never expose sensitive utility or infrastructure information. Cover this taxonomy:\n${SOURCE_TAXONOMY_TEXT}`,
+    instructions: `Assist a licensed civil engineer and public-procurement reviewer. Review only the supplied three-page-or-smaller batch. Report a page separately for every supplied page number. Use the proposal text as evidence and use only the supplied extracted requirements as controlling standards. Catalog links are discovery context only and cannot support pass/fail unless an extracted requirement is supplied. Work in strict jurisdiction order: ${sourceStatus.jurisdiction.state} first, then ${sourceStatus.jurisdiction.city}; never apply another city, county, district, or private entity. Check explicitly shown arithmetic from visible operands and results; flag discrepancies for engineer review, and do not claim unit or dimensional compliance based on arithmetic alone. Use green only when no concern is visible, yellow whenever a professional check or missing source is needed, and red only for a clear material conflict supported by quoted proposal evidence. Do not invent values, drawings, citations, or visible content. An empty/image-only page must be yellow and referred to diagram analysis. Never expose sensitive utility or infrastructure information. Cover this taxonomy:\n${SOURCE_TAXONOMY_TEXT}`,
     input: `PROPOSAL: ${proposal.name}\nCLIENT: ${proposal.company || ''}\nSTATE: ${sourceStatus.jurisdiction.state}\nCITY: ${sourceStatus.jurisdiction.city}\nBATCH: pages ${firstPage}-${lastPage}\n\nPAGES:\n${pages.map(page => `--- PAGE ${page.pageNumber} ---\n${page.text.slice(0, 12000) || '[No extractable text on this page]'}`).join('\n\n')}\n\nEXTRACTED CONTROLLING REQUIREMENTS (STATE FIRST, THEN CITY):\n${JSON.stringify(requirements)}\n\nJURISDICTION-FILTERED CATALOG LINKS (DISCOVERY ONLY):\n${JSON.stringify(catalog)}`,
     maxOutputTokens: 2200
   }
@@ -357,11 +395,11 @@ function finalizeDocumentReview(proposal, status, stoppedReason = null) {
   return proposal.aiDocumentReview
 }
 
-async function extractRequirements(text, context) {
+async function extractRequirements(text, context, includeCalculations = false) {
   return structuredResponse({
     name: 'civil_engineering_requirements',
-    schema: requirementSchema,
-    instructions: `You extract explicit civil-engineering, procurement, contract, permitting, cost, schedule, qualification, and project requirements or submitted values. Never invent values. "max" means the submitted value must be greater than or equal to the requirement (minimum depth, thickness, strength, compaction, diameter). "min" means it must be less than or equal (maximum slope, maximum spacing). "exact" is categorical or exact. Preserve units, coordinate systems, defined terms, scoring rules, and missing-value conventions. Page numbers must come from visible page markers; otherwise null. Excerpts must be short verbatim evidence. Evaluate the document against this source taxonomy:\n${SOURCE_TAXONOMY_TEXT}`,
+    schema: includeCalculations ? proposalReviewSchema : requirementSchema,
+    instructions: `You extract explicit civil-engineering, procurement, contract, permitting, cost, schedule, qualification, and project requirements or submitted values. Never invent values. ${includeCalculations ? 'Also extract each explicitly printed calculation, its exact arithmetic expression, named operands and numeric values, reported result, units, page, and short verbatim evidence. Do not infer missing operands or silently repair formulas. Return an empty calculations array when no explicit calculation is shown.' : ''} "max" means the submitted value must be greater than or equal to the requirement (minimum depth, thickness, strength, compaction, diameter). "min" means it must be less than or equal (maximum slope, maximum spacing). "exact" is categorical or exact. Preserve units, coordinate systems, defined terms, scoring rules, and missing-value conventions. Page numbers must come from visible page markers; otherwise null. Excerpts must be short verbatim evidence. Evaluate the document against this source taxonomy:\n${SOURCE_TAXONOMY_TEXT}`,
     input: `${context}\n\nDOCUMENT:\n${text.slice(0, 180000)}`,
     maxOutputTokens: 12000
   })
@@ -642,6 +680,14 @@ app.get('/api/standards', async (req, res) => {
 
 app.get('/api/source-categories', (_req, res) => {
   res.json(SOURCE_CATEGORIES)
+})
+
+app.get('/api/jurisdictions', (_req, res) => {
+  res.json(UTAH_MUNICIPALITIES.map(municipality => ({
+    name: municipality.name,
+    state: municipality.state,
+    counties: municipality.counties
+  })))
 })
 
 app.get('/api/admin/ai-status', async (req, res) => {
@@ -937,7 +983,7 @@ app.get('/api/me/proposals', async (req, res) => {
 app.get('/api/proposals', async (req, res) => {
   const { search, status, location, company, assignedToId } = req.query
   let list = await companyList(req)
-  if (search) { const q = search.toLowerCase(); list = list.filter(p => [p.name, p.company, p.location].some(v => (v || '').toLowerCase().includes(q))) }
+  if (search) { const q = search.toLowerCase(); list = list.filter(p => [p.name, p.company, p.location, p.postalCode].some(v => (v || '').toLowerCase().includes(q))) }
   if (status) list = list.filter(p => p.status === status)
   if (location) list = list.filter(p => (p.location || '').toLowerCase().includes(location.toLowerCase()))
   if (company) list = list.filter(p => (p.company || '').toLowerCase().includes(company.toLowerCase()))
@@ -963,7 +1009,12 @@ app.get('/api/proposals/:id', async (req, res) => {
 app.post('/api/proposals', upload.single('file'), async (req, res) => {
   try {
     const { name, company, location } = req.body
+    const postalCode = String(req.body.postal_code || '').trim()
     if (!name) return res.status(400).json({ error: 'Name required' })
+    if (!String(location || '').trim()) return res.status(400).json({ error: 'A governing city and state are required' })
+    if (!hasExplicitState(location)) return res.status(400).json({ error: 'Include Utah state in the governing location (UT or Utah), for example “Brigham City, UT”.' })
+    if (!resolveProposalJurisdiction([], { location }).resolved) return res.status(400).json({ error: 'Enter a supported Utah municipality and state. ZIP codes are optional and cannot determine jurisdiction.' })
+    if (postalCode && !/^\d{5}(?:-\d{4})?$/.test(postalCode)) return res.status(400).json({ error: 'ZIP code must use 5 digits or ZIP+4 format' })
     const id = crypto.randomUUID()
     const user = await currentUser(req)
     let text = req.body.text_content || ''
@@ -985,7 +1036,7 @@ app.post('/api/proposals', upload.single('file'), async (req, res) => {
 
     const now = new Date().toISOString()
     const proposal = {
-      id, name, company: company || '', location: location || '',
+      id, name, company: company || '', location: location.trim(), postalCode,
       status: 'pending', file_path: filePath, file_storage: fileStorage, file_content_type: fileContentType, text_content: text,
       sections: detectSections(text), highlights: [],
       createdById: req.user.id, createdByName: req.user.name, companyId: user?.companyId,
@@ -993,7 +1044,7 @@ app.post('/api/proposals', upload.single('file'), async (req, res) => {
     }
     await writeProposal(id, proposal)
     const idx = await readIndex()
-    idx.push({ id, name, company: proposal.company, location: proposal.location, status: proposal.status, companyId: proposal.companyId, created_at: now, updated_at: now })
+    idx.push({ id, name, company: proposal.company, location: proposal.location, postalCode: proposal.postalCode, status: proposal.status, companyId: proposal.companyId, created_at: now, updated_at: now })
     await writeIndex(idx)
     res.json({ id, sections: proposal.sections })
   } catch (err) { console.error(err); res.status(500).json({ error: err.message }) }
@@ -1002,12 +1053,23 @@ app.post('/api/proposals', upload.single('file'), async (req, res) => {
 app.put('/api/proposals/:id', async (req, res) => {
   const p = await readProposal(req.params.id)
   if (!p) return res.status(404).json({ error: 'Not found' })
-  const allowed = ['name', 'company', 'location', 'status', 'sections', 'highlights', 'diagramAnalysis', 'assignedTo', 'assignedToId', 'dueDate', 'priority']
-  for (const k of allowed) { if (req.body[k] !== undefined) p[k] = req.body[k] }
+  if (req.body.location !== undefined) {
+    if (!String(req.body.location || '').trim()) return res.status(400).json({ error: 'A governing city and state are required' })
+    if (!hasExplicitState(req.body.location)) return res.status(400).json({ error: 'Include Utah state in the governing location (UT or Utah), for example “Brigham City, UT”.' })
+    if (!resolveProposalJurisdiction([], { location: req.body.location }).resolved) return res.status(400).json({ error: 'Enter a supported Utah municipality and state. ZIP codes are optional and cannot determine jurisdiction.' })
+  }
+  if (req.body.postalCode !== undefined) {
+    const postalCode = String(req.body.postalCode || '').trim()
+    if (postalCode && !/^\d{5}(?:-\d{4})?$/.test(postalCode)) return res.status(400).json({ error: 'ZIP code must use 5 digits or ZIP+4 format' })
+  }
+  const allowed = ['name', 'company', 'location', 'postalCode', 'status', 'sections', 'highlights', 'diagramAnalysis', 'assignedTo', 'assignedToId', 'dueDate', 'priority']
+  for (const k of allowed) {
+    if (req.body[k] !== undefined) p[k] = ['location', 'postalCode'].includes(k) ? String(req.body[k] || '').trim() : req.body[k]
+  }
   p.updated_at = new Date().toISOString()
   await writeProposal(req.params.id, p)
   const idx = (await readIndex()).map(i => i.id === req.params.id
-    ? { ...i, name: p.name, company: p.company, location: p.location, status: p.status, assignedTo: p.assignedTo || '', assignedToId: p.assignedToId || '', dueDate: p.dueDate || '', priority: p.priority || '', updated_at: p.updated_at }
+    ? { ...i, name: p.name, company: p.company, location: p.location, postalCode: p.postalCode || '', status: p.status, assignedTo: p.assignedTo || '', assignedToId: p.assignedToId || '', dueDate: p.dueDate || '', priority: p.priority || '', updated_at: p.updated_at }
     : i)
   await writeIndex(idx)
   res.json({ success: true })
@@ -1304,9 +1366,10 @@ app.post('/api/proposals/:id/compliance-review', async (req, res) => {
       return res.status(202).json({ status: started.status, job: p.complianceReviewJob, sourceStatus })
     }
 
-    const extracted = await extractRequirements(p.text_content || '', `PROPOSAL: ${p.name}\nCLIENT: ${p.company}\nSUBMITTED LOCATION: ${p.location}\nExtract submitted design values, not governing standards.`)
+    const extracted = await extractRequirements(p.text_content || '', `PROPOSAL: ${p.name}\nCLIENT: ${p.company}\nSUBMITTED LOCATION: ${p.location}\nZIP (context only; does not determine jurisdiction): ${p.postalCode || 'not provided'}\nExtract submitted design values, not governing standards.`, true)
     const proposalRequirements = await addRequirementEmbeddings(extracted.data.requirements)
-    const matrix = buildMatrix(proposalRequirements, docs)
+    const calculations = auditCalculations(extracted.data.calculations)
+    const matrix = buildMatrix(proposalRequirements, docs, calculations)
     const summary = {
       pass: matrix.filter(x => x.result === 'pass').length,
       fail: matrix.filter(x => x.result === 'fail').length,
@@ -1316,13 +1379,14 @@ app.post('/api/proposals/:id/compliance-review', async (req, res) => {
       jurisdiction: extracted.data.jurisdiction,
       projectScope: extracted.data.projectScope,
       proposalRequirements,
+      calculations,
       matchedDocumentIds: docs.map(x => x.id),
       sourceStatus,
       matrix,
       summary,
       generatedAt: new Date().toISOString(),
       openai: { responseId: extracted.responseId, model: extracted.model },
-      decisionPolicy: 'City/client baseline; site-specific source controls only when deterministically stricter; conflicts require engineer review.'
+      decisionPolicy: 'City/client baseline; site-specific source controls only when deterministically stricter; conflicts require engineer review. Explicit arithmetic is independently recomputed when operands are available; units and engineering applicability require professional verification.'
     }
     p.updated_at = new Date().toISOString()
     delete p.complianceReviewJob

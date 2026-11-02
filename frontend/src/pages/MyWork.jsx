@@ -143,7 +143,7 @@ function ProposalRow({ p, onClick, action }) {
         <div style={{ fontWeight: 700, fontSize: 14, color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 2 }}>{p.name}</div>
         <div style={{ fontSize: 11, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
           {p.company && <span style={{ color: '#64748b', fontWeight: 500 }}>{p.company}</span>}
-          {p.location && <><span>·</span><span>📍 {p.location}</span></>}
+          {(p.location || p.postalCode) && <><span>·</span><span>📍 {[p.location, p.postalCode].filter(Boolean).join(' ')}</span></>}
           <span>· {relTime(p.updated_at)}</span>
         </div>
       </div>

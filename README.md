@@ -46,6 +46,7 @@ SOURCE_HEALTH_CHECK_INTERVAL_MS=21600000
 - Structured civil requirement extraction with page evidence
 - Hybrid vector/keyword retrieval scoped by jurisdiction and client
 - Deterministic stricter-of-city-and-site rules engine
+- Deterministic arithmetic audit of explicitly printed proposal calculations
 - Full cited compliance matrix with pass/fail/engineer-review outcomes
 
 ## Compliance workflow
@@ -81,6 +82,9 @@ limits. A user can also stop the active background response from the tracker.
 - The catalog uses 17 source categories covering engineering standards, codes, hazards, subsurface, GIS/survey, utilities, transportation, environmental requirements, capital plans, permitting, procurement, contracts, cost/schedule, vendor qualifications, project documents, lessons learned, and definitions/data dictionaries.
 - Administrators can open **Source health** to see missing URLs, broken links, redirects/content changes, and unchecked sources. Checks run at startup and on `SOURCE_HEALTH_CHECK_INTERVAL_MS`; administrators can also check one source or all sources immediately and acknowledge notifications.
 - Proposal analysis requires a specific city and state. Sources are filtered before AI use: applicable statewide records are considered first, then exact-city records. Other cities, counties, districts, and unrelated publisher indexes are excluded and counted in the UI.
+- The Utah discovery catalog includes a 257-municipality index. Imported source links are unverified discovery records with no extracted requirements; a link or municipality entry is never proof of adoption, current status, or compliance.
+- ZIP is optional proposal context and is searchable/displayed with the proposal, but does not resolve jurisdiction or select standards. City and state control; the catalog does not contain a ZIP-to-municipality boundary crosswalk.
+- Structured standards comparison independently recomputes explicitly extracted arithmetic using a bounded expression parser (numbers, named operands, parentheses, `+`, `-`, `*`, `/`, and `^`). Unsupported or incomplete equations are sent for engineer review. Numeric agreement does not verify units, dimensions, engineering assumptions, or whether the equation is appropriate.
 - Catalog-assisted structured comparisons run as OpenAI background responses and the browser polls for completion, avoiding Vercel's 60-second request timeout while preserving visible queued/in-progress/failed states.
 
 ## Data and deployment

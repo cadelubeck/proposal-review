@@ -22,11 +22,13 @@ export default function List() {
   const apiFetch = useApiFetch()
   const [proposals, setProposals] = useState([])
   const [clients, setClients] = useState([])
+  const [municipalities, setMunicipalities] = useState([])
+  const [jurisdictionError, setJurisdictionError] = useState('')
   const [search, setSearch] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [showUpload, setShowUpload] = useState(false)
   const [expanded, setExpanded] = useState({})
-  const [form, setForm] = useState({ name: '', company: '', location: '' })
+  const [form, setForm] = useState({ name: '', company: '', location: '', postalCode: '' })
   const [file, setFile] = useState(null)
   const [pasteText, setPasteText] = useState('')
   const [uploading, setUploading] = useState(false)
@@ -54,6 +56,17 @@ export default function List() {
     apiFetch('/api/clients').then(r => r.json()).then(setClients).catch(() => {})
   }, [])
   useEffect(() => {
+    let active = true
+    apiFetch('/api/jurisdictions').then(async response => {
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Municipality list could not be loaded.')
+      if (active) setMunicipalities(data)
+    }).catch(error => {
+      if (active) setJurisdictionError(error.message)
+    })
+    return () => { active = false }
+  }, [])
+  useEffect(() => {
     if (!['manager', 'admin'].includes(user?.role)) return
     apiFetch('/api/admin/source-health').then(response => response.ok ? response.json() : null).then(data => data && setSourceAlerts(data.notificationCount || 0)).catch(() => {})
   }, [user?.role])
@@ -67,14 +80,20 @@ export default function List() {
 
   const handleUpload = async () => {
     if (!form.name.trim()) return alert('Contract name is required')
+    if (!form.location.trim()) return alert('Governing city and state are required')
+    if (!/\b(?:utah|ut)\b/i.test(form.location)) return alert('Include Utah state in the governing location, e.g. Brigham City, UT')
+    if (form.postalCode && !/^\d{5}(?:-\d{4})?$/.test(form.postalCode.trim())) return alert('ZIP code must use 5 digits or ZIP+4 format')
     if (!file && !pasteText.trim()) return alert('Upload a file or paste text')
     setUploading(true)
     const fd = new FormData()
     fd.append('name', form.name); fd.append('company', form.company); fd.append('location', form.location)
+    fd.append('postal_code', form.postalCode.trim())
     if (file) fd.append('file', file); else fd.append('text_content', pasteText)
     try {
       const r = await apiFetch('/api/proposals', { method: 'POST', body: fd })
-      const { id } = await r.json()
+      const data = await r.json()
+      if (!r.ok) throw new Error(data.error || 'Upload failed.')
+      const { id } = data
       nav(`/proposal/${id}`)
     } catch (e) { alert('Upload failed: ' + e.message) }
     finally { setUploading(false) }
@@ -177,8 +196,13 @@ export default function List() {
           <label htmlFor="contract-client">Client</label>
           <input id="contract-client" value={form.company} list="client-options" onChange={event => setForm(current => ({ ...current, company:event.target.value }))} placeholder="Select or enter a new client" />
           <datalist id="client-options">{clients.map(client => <option key={client} value={client} />)}</datalist>
-          <label htmlFor="contract-location">Location / jurisdiction</label>
-          <input id="contract-location" value={form.location} onChange={event => setForm(current => ({ ...current, location:event.target.value }))} placeholder="e.g. Denver, CO" />
+          <label htmlFor="contract-location">Governing city and state <span aria-hidden="true">*</span></label>
+          <input id="contract-location" list="municipality-options" value={form.location} onChange={event => setForm(current => ({ ...current, location:event.target.value }))} placeholder="e.g. Brigham City, UT" required />
+          <datalist id="municipality-options">{municipalities.map(municipality => <option key={`${municipality.name}-${municipality.state}`} value={`${municipality.name}, ${municipality.state === 'Utah' ? 'UT' : municipality.state}`} label={municipality.counties.join(', ')} />)}</datalist>
+          <p className="civic-muted" style={{ fontSize:11, margin:'-5px 0 12px' }}>Select the municipality with authority over the project. ZIP codes are optional and do not determine jurisdiction.</p>
+          {jurisdictionError && <p role="status" style={{ color:'#b45309', fontSize:11, margin:'-6px 0 12px' }}>City suggestions unavailable: {jurisdictionError} Enter the governing city and state manually.</p>}
+          <label htmlFor="contract-postal-code">ZIP code (optional)</label>
+          <input id="contract-postal-code" value={form.postalCode} onChange={event => setForm(current => ({ ...current, postalCode:event.target.value }))} placeholder="e.g. 84321" inputMode="numeric" pattern="\d{5}(-\d{4})?" maxLength={10} />
           <label htmlFor="contract-file">Document</label>
           <input ref={fileRef} id="contract-file" type="file" accept=".pdf,.txt" onChange={event => { setFile(event.target.files[0]); setPasteText('') }} style={{ display:'none' }} />
           <button type="button" className="civic-btn" style={{ width:'100%', minHeight:70, borderStyle:'dashed', justifyContent:'start' }} onClick={() => fileRef.current?.click()}><Icon name="file" /> {file ? file.name : 'Choose PDF or TXT file (up to 50 MB)'}</button>

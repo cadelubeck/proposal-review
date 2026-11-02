@@ -74,8 +74,46 @@ function evaluate(proposal, controlling) {
   return { result: pass ? 'pass' : 'fail', reason: pass ? 'Submitted specification matches.' : 'Submitted specification does not match.' }
 }
 
-function buildMatrix(proposalRequirements, documents) {
-  return proposalRequirements.map(submitted => {
+function normalizedSubject(subject) {
+  return String(subject || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+function applyCalculationAudits(matrix, calculations = []) {
+  return matrix.map(row => {
+    const subject = normalizedSubject(row.subject)
+    const calculationChecks = subject
+      ? calculations.filter(item => normalizedSubject(item.subject) === subject)
+      : []
+    if (!calculationChecks.length) return row
+    const calculationCheck = calculationChecks.find(item => item.status === 'mismatch')
+      || calculationChecks.find(item => item.status === 'review')
+      || calculationChecks[0]
+    if (calculationChecks.some(item => item.status === 'mismatch')) {
+      return {
+        ...row,
+        calculationCheck,
+        calculationChecks,
+        result: 'fail',
+        reason: `The submitted arithmetic is inconsistent: ${calculationCheck.reason} ${row.reason}`,
+        recommendedCorrection: 'Correct the calculation and update the submitted value before relying on this comparison.'
+      }
+    }
+    if (calculationChecks.some(item => item.status === 'review') && row.result === 'pass') {
+      return {
+        ...row,
+        calculationCheck,
+        calculationChecks,
+        result: 'review',
+        reason: `The calculation could not be verified deterministically. ${row.reason}`,
+        recommendedCorrection: 'Have the responsible engineer verify the equation, operands, and units.'
+      }
+    }
+    return { ...row, calculationCheck, calculationChecks }
+  })
+}
+
+function buildMatrix(proposalRequirements, documents, calculations = []) {
+  const matrix = proposalRequirements.map(submitted => {
     const candidates = retrieve(submitted, documents)
     const baselines = candidates.filter(x => isBaselineDocument(x.document))
     const sites = candidates.filter(x => !isBaselineDocument(x.document))
@@ -98,11 +136,12 @@ function buildMatrix(proposalRequirements, documents) {
       controllingValue: controlling ? `${controlling.value} ${controlling.unit || ''}`.trim() : null,
       result: outcome.result,
       reason: outcome.reason,
-      recommendedCorrection: outcome.result === 'fail' ? `Revise to meet ${controlling.value} ${controlling.unit || ''}.`.trim() : outcome.result === 'review' ? 'Engineer must resolve the source conflict or missing requirement.' : '',
+      recommendedCorrection: outcome.result === 'fail' ? `Revise to meet ${controlling?.value ?? 'the requirement'} ${controlling?.unit || ''}.`.trim() : outcome.result === 'review' ? 'Engineer must resolve the source conflict or missing requirement.' : '',
       source: sourceDoc ? { documentId: sourceDoc.id, title: sourceDoc.title, page: controlling.page, excerpt: controlling.excerpt } : null,
       candidates: candidates.slice(0, 3).map(x => ({ documentId: x.document.id, title: x.document.title, page: x.rule.page, score: x.score }))
     }
   })
+  return applyCalculationAudits(matrix, calculations)
 }
 
-module.exports = { buildMatrix, retrieve, strictnessWinner, evaluate }
+module.exports = { applyCalculationAudits, buildMatrix, retrieve, strictnessWinner, evaluate }

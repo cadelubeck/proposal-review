@@ -1,6 +1,9 @@
 const assert = require('node:assert/strict')
-const { buildSourceStatus, locationMatches, matchingDocuments, researchDocuments, resolveProposalJurisdiction } = require('./source-context')
+const { buildSourceStatus, hasExplicitState, locationMatches, matchingDocuments, researchDocuments, resolveProposalJurisdiction } = require('./source-context')
 
+assert.equal(hasExplicitState('Brigham City, UT'), true)
+assert.equal(hasExplicitState('Brigham City, Utah'), true)
+assert.equal(hasExplicitState('Brigham City'), false)
 assert.equal(locationMatches('Brigham City', 'Brigham City, UT'), true)
 assert.equal(locationMatches('125 Main Street, Brigham City, UT', 'Brigham City, Utah'), true)
 assert.equal(locationMatches('Box Elder, Utah', 'Box Elder County, UT'), false)
@@ -37,5 +40,17 @@ assert.equal(status.researchSourceCount, 1)
 const unresolved = { location: 'Utah', company: 'Example' }
 assert.equal(resolveProposalJurisdiction(documents, unresolved).resolved, false)
 assert.deepEqual(researchDocuments(documents, unresolved), [])
+assert.deepEqual(
+  resolveProposalJurisdiction([], { location: 'Woods Cross, UT 84087' }),
+  { state: 'Utah', city: 'Woods Cross', resolved: true, submittedLocation: 'Woods Cross, UT 84087' }
+)
+assert.equal(resolveProposalJurisdiction([], { location: 'West Valley City, Utah' }).city, 'West Valley City')
+assert.equal(resolveProposalJurisdiction([], { location: 'Valley City, Utah' }).resolved, false)
+assert.equal(resolveProposalJurisdiction([], { location: '84087' }).resolved, false)
+const similarCitySources = [
+  { id: 'ogden-valley', title: 'Ogden Valley source', jurisdiction: 'Ogden Valley City, Utah', catalogScope: 'municipal', sourceUrl: 'https://example.gov/ogden-valley' },
+  { id: 'valley', title: 'Valley City source', jurisdiction: 'Valley City, Utah', catalogScope: 'municipal', sourceUrl: 'https://example.gov/valley' }
+]
+assert.deepEqual(researchDocuments(similarCitySources, { location: 'Ogden Valley City, UT' }).map(doc => doc.id), ['ogden-valley'])
 
 console.log('source context: ok')

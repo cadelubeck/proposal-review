@@ -10,6 +10,14 @@
       "env": {
         "PYTHONPATH": "/Users/lubecklaptop/Library/Python/3.11/lib/python/site-packages"
       }
+    },
+    "city-reviewer-supabase": {
+      "type": "http",
+      "url": "https://mcp.supabase.com/mcp?project_ref=xfqifuilriloqkvpxppw"
+    },
+    "city-reviewer-vercel": {
+      "type": "http",
+      "url": "https://mcp.vercel.com"
     }
   }
 }

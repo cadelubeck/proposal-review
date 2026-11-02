@@ -233,7 +233,7 @@ export default function AiReview() {
     <header className="civic-header">
       <button onClick={() => nav(`/proposal/${id}`)} className="civic-btn civic-icon-btn" title="Back to proposal" aria-label="Back to proposal"><Icon name="arrow" /></button>
       <a href="/" className="civic-brand"><span className="civic-brand-mark"><Icon name="civic" size={18} /></span><span>CivicReview AI</span></a>
-      <div className="civic-header-meta"><strong title={proposal.name}>{proposal.name}</strong><span className="jurisdiction">{proposal.location || 'Jurisdiction not set'}</span></div>
+      <div className="civic-header-meta"><strong title={proposal.name}>{proposal.name}</strong><span className="jurisdiction">{[proposal.location, proposal.postalCode].filter(Boolean).join(' · ') || 'Jurisdiction not set'}</span></div>
       {activeType && <button onClick={stopActive} className="civic-btn civic-btn-danger">Stop AI task</button>}
     </header>
     <nav className="civic-mobile-nav" aria-label="Review sections">{sectionLinks}</nav>
@@ -241,7 +241,7 @@ export default function AiReview() {
       <aside className="civic-review-sidebar"><div className="civic-eyebrow" style={{ padding:'0 12px 12px' }}>Review workspace</div><nav aria-label="Review sections">{sectionLinks}</nav><div className="civic-sidebar-foot"><strong>{completedCount} of 3 analyses complete</strong><div>{assessment}</div><p style={{ marginTop:10 }}>AI findings support review. Final approval remains with the responsible engineer.</p></div></aside>
     <main className="civic-review-main">
       <section id="overview">
-        <div className="civic-overview-heading"><div><div className="civic-eyebrow">AI review workspace</div><h1 className="civic-title">Compliance review</h1><p className="civic-muted" style={{ fontSize:14 }}>{proposal.name} · {proposal.location || 'Jurisdiction not set'}{lastReview && <> · Last reviewed {new Date(lastReview).toLocaleString()}</>}</p></div><a className="civic-btn" href="#review-coverage" onClick={() => setSection('#overview')}>Review actions <Icon name="chevron" size={15} /></a></div>
+        <div className="civic-overview-heading"><div><div className="civic-eyebrow">AI review workspace</div><h1 className="civic-title">Compliance review</h1><p className="civic-muted" style={{ fontSize:14 }}>{proposal.name} · {[proposal.location, proposal.postalCode].filter(Boolean).join(' ') || 'Jurisdiction not set'}{lastReview && <> · Last reviewed {new Date(lastReview).toLocaleString()}</>}</p></div><a className="civic-btn" href="#review-coverage" onClick={() => setSection('#overview')}>Review actions <Icon name="chevron" size={15} /></a></div>
         <div className="civic-card civic-summary"><div className="assessment"><div className="civic-eyebrow">Overall assessment</div><strong>{assessment}</strong><p>{activeType ? `${activeLabel} is running.` : completedCount ? `${completedCount} of 3 analyses have saved results.` : 'Run an analysis to begin reviewing evidence.'}</p></div><div className="critical"><div className="civic-eyebrow">Critical / fail</div><strong>{criticalCount}</strong><p>Needs attention</p></div><div className="review"><div className="civic-eyebrow">Engineer review</div><strong>{reviewCount}</strong><p>Needs judgment</p></div><div><div className="civic-eyebrow">Diagrams</div><strong>{diagrams?.diagrams?.length || 0}</strong><p>Visual elements found</p></div></div>
       </section>
       {error && <div className="civic-notice error" role="alert" style={{ marginBottom:16 }}>{error}</div>}

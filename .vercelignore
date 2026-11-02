@@ -1,0 +1,11 @@
+.git
+.codex
+.vscode
+.project-account.json
+**/.env*
+**/node_modules
+backend/.private
+backend/data
+backend/uploads
+backend/standards
+frontend/dist
