@@ -1540,12 +1540,13 @@ app.post('/api/proposals/:id/analyze-diagrams', async (req, res) => {
       scoringRule: rule.scoringRule,
       missingValueConvention: rule.missingValueConvention
     }))).slice(0, 160)
+    const officialReferences = referenceContext(catalogDocs, p)
     const started = await startBackgroundStructuredResponse({
       name: 'diagram_analysis', schema: diagramSchema,
       instructions: `${REQUIREMENT_INSTRUCTIONS} Return standardsChecks for each relevant requirement actually found, explicitly stating what the standard requires, the proposal evidence, and the comparison. Cite the original page and section. A reference gap, missing field measurement, and missing approval are different findings. Assist a licensed civil engineer and public-procurement reviewer. Analyze every visible plan, detail, section, table, schedule, form, and contract provision and cite page or sheet identifiers. Compare against the supplied extracted library requirements. Research the project location and governing agencies using allowed authoritative domains. Cover this complete taxonomy:\n${SOURCE_TAXONOMY_TEXT}\nNever invent a requirement, condition, URL, or compliance conclusion. Distinguish controlling adopted requirements from informational evidence. If a needed source is unavailable, stale, or its location relevance cannot be established, mark it missing and use yellow rather than claiming compliance. Apply vendor criteria only when legally permissible. Never expose, summarize, or search for restricted utility or critical-infrastructure details. Research findings are screening evidence, not a substitute for a site-specific stamped report or legal determination.`,
       input: [{ role: 'user', content: [
         { type: 'input_file', filename: p.file_path.split('/').pop(), file_data: `data:application/pdf;base64,${fileBuffer.toString('base64')}` },
-        { type: 'input_text', text: `Review ${p.name}, ${p.company || ''}, ${p.location || ''}. Work in strict jurisdiction order: ${sourceStatus.jurisdiction.state} first, then ${sourceStatus.jurisdiction.city}. Do not use another city, county, district, or private entity.\n\nSOURCE PRECEDENCE (highest first): issued addenda/clarifications; executed contract and special provisions/plans/specifications; solicitation and evaluation criteria; expressly incorporated municipal standards edition; applicable law/permits/funding; adopted municipal code/plans/policies; then maps, portals, studies, and historical data. Never substitute the newest edition for the incorporated edition.\n\nMATCHED EXTRACTED LIBRARY REQUIREMENTS:\n${JSON.stringify(libraryRequirements)}\n\nJURISDICTION-FILTERED CATALOG SOURCES, STATE FIRST THEN CITY (discovery/screening unless adoption and project applicability are verified):\n${JSON.stringify(catalogDocs.map(sourceForCatalogPrompt))}\n\nOFFICIAL STANDARD PASSAGES (source evidence, not merely catalog links):\n${JSON.stringify(referenceContext(catalogDocs, p))}` }
+        { type: 'input_text', text: `Review ${p.name}, ${p.company || ''}, ${p.location || ''}. Work in strict jurisdiction order: ${sourceStatus.jurisdiction.state} first, then ${sourceStatus.jurisdiction.city}. Do not use another city, county, district, or private entity.\n\nSOURCE PRECEDENCE (highest first): issued addenda/clarifications; executed contract and special provisions/plans/specifications; solicitation and evaluation criteria; expressly incorporated municipal standards edition; applicable law/permits/funding; adopted municipal code/plans/policies; then maps, portals, studies, and historical data. Never substitute the newest edition for the incorporated edition.\n\nMATCHED EXTRACTED LIBRARY REQUIREMENTS:\n${JSON.stringify(libraryRequirements)}\n\nJURISDICTION-FILTERED CATALOG SOURCES, STATE FIRST THEN CITY (discovery/screening unless adoption and project applicability are verified):\n${JSON.stringify(catalogDocs.map(sourceForCatalogPrompt))}\n\nOFFICIAL STANDARD PASSAGES (source evidence, not merely catalog links):\n${JSON.stringify(officialReferences)}` }
       ]}],
       maxOutputTokens: 10000,
       webSearchDomains: [...new Set([
@@ -1554,6 +1555,7 @@ app.post('/api/proposals/:id/analyze-diagrams', async (req, res) => {
       ])].slice(0, 100)
     })
     p.diagramAnalysisJob = {
+      referenceSources: officialReferences.map(source => ({ url: source.url, pages: source.pages.map(page => page.page) })),
       responseId: started.responseId,
       status: started.status,
       model: started.model,
@@ -1599,6 +1601,7 @@ app.get('/api/proposals/:id/analyze-diagrams/status', async (req, res) => {
     const verifiedUrls = new Set([...(analyzed.sources || []).map(source => source.url), ...(sourceStatus.referenceSources || []).map(source => source.sourceUrl)])
     p.diagramAnalysis = {
       ...analyzed.data,
+      referenceSources: p.diagramAnalysisJob.referenceSources || [],
       standardsChecks: (analyzed.data.standardsChecks || []).map(check => verifiedUrls.has(check.sourceUrl) ? check : { ...check, result: 'review', reason: `${check.reason} Source citation was not verified.` }),
       researchFindings: (analyzed.data.researchFindings || []).filter(finding => verifiedUrls.has(finding.sourceUrl)),
       sourceStatus,

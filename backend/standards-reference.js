@@ -18,16 +18,20 @@ function referenceContext(documents, proposal, { maxPages = 18, maxChars = 48000
       const text = page.text.toLowerCase()
       let score = terms.reduce((sum, term) => sum + (text.includes(term) ? 1 : 0), 0)
       for (const pattern of TOPICS) if (pattern.test(query) && pattern.test(text)) score += 30
+      const heading = text.slice(0, 450).replace(/\s+/g, '')
+      if (/\b(bore|boring|directional)\b/i.test(query) && /directionalbore|borepath/.test(heading)) score += 150
       // Contents pages list every topic without supplying the actual provisions.
       if (/table of contents/i.test(page.text)) score = 0
       return { ...page, score }
     }).filter(page => page.score > 0).sort((a, b) => b.score - a.score || a.pageNumber - b.pageNumber)
     let remaining = maxChars
-    const pages = ranked.slice(0, maxPages).sort((a, b) => a.pageNumber - b.pageNumber).flatMap(page => {
+    // Spend the budget on the best matches first. Sorting by page before
+    // budgeting can discard the key later chapter in favor of general pages.
+    const pages = ranked.slice(0, maxPages).flatMap(page => {
       if (remaining < page.text.length) return []
       remaining -= page.text.length
       return [{ page: page.pageNumber, text: page.text }]
-    })
+    }).sort((a, b) => a.page - b.page)
     if (pages.length) references.push({
       documentId: doc.id, title: doc.title, url: doc.sourceUrl,
       edition: doc.edition, jurisdiction: doc.jurisdiction, retrievedAt: doc.retrievedAt,

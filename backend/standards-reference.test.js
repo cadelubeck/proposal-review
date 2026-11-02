@@ -24,4 +24,6 @@ assert.equal(analysisDocuments([{id:'private',sensitivity:'restricted'}]).some(d
 const small = referenceContext(selected, proposal, { maxPages:5, maxChars:16000 })
 assert.ok(small[0].pages.length <= 5)
 assert.ok(small[0].pages.reduce((sum,page)=>sum+page.text.length,0) <= 16000)
+const dense = referenceContext(selected, { ...proposal, text_content: selected.find(doc=>doc.referencePages)?.referencePages.slice(10,70).map(page=>page.text).join('\n') + '\nDirectional bore telecom conduit' }, { maxPages:18, maxChars:16000 })
+assert.ok(dense[0].pages.some(page=>page.page === 84), 'A tight budget must retain the directly relevant bore chapter ahead of generic earlier pages')
 console.log('Official standards: unseeded catalog, exact city, cited page retrieval, scope isolation and prompt bounds: ok')
