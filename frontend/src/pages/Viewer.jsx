@@ -20,6 +20,54 @@ function useDebounce(fn, delay) {
   }, [fn, delay])
 }
 
+function CollapseBtn({ side, open, onClick }) {
+  const isLeft = side === 'left'
+  return (
+    <button onClick={onClick}
+      title={open ? `Collapse ${isLeft ? 'sections' : 'review'} panel` : `Expand ${isLeft ? 'sections' : 'review'} panel`}
+      style={{
+        width: 24, flexShrink: 0, alignSelf: 'stretch', border: 'none', cursor: 'pointer',
+        background: '#f8fafc', color: '#94a3b8',
+        borderLeft: !isLeft ? '1px solid #e2e8f0' : 'none',
+        borderRight: isLeft ? '1px solid #e2e8f0' : 'none',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        transition: 'background 0.12s, color 0.12s'
+      }}
+      onMouseEnter={e => { e.currentTarget.style.background = '#e2e8f0'; e.currentTarget.style.color = '#475569' }}
+      onMouseLeave={e => { e.currentTarget.style.background = '#f8fafc'; e.currentTarget.style.color = '#94a3b8' }}>
+      {isLeft ? (
+        open ? (
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="1.5" y="2" width="13" height="12" rx="2"/>
+            <line x1="6" y1="2" x2="6" y2="14"/>
+            <polyline points="4,6.5 2.5,8 4,9.5"/>
+          </svg>
+        ) : (
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="1.5" y="2" width="13" height="12" rx="2"/>
+            <line x1="6" y1="2" x2="6" y2="14"/>
+            <polyline points="8,6.5 9.5,8 8,9.5"/>
+          </svg>
+        )
+      ) : (
+        open ? (
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="1.5" y="2" width="13" height="12" rx="2"/>
+            <line x1="10" y1="2" x2="10" y2="14"/>
+            <polyline points="12,6.5 13.5,8 12,9.5"/>
+          </svg>
+        ) : (
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="1.5" y="2" width="13" height="12" rx="2"/>
+            <line x1="10" y1="2" x2="10" y2="14"/>
+            <polyline points="8,6.5 6.5,8 8,9.5"/>
+          </svg>
+        )
+      )}
+    </button>
+  )
+}
+
 export default function Viewer() {
   const { id } = useParams()
   const nav = useNavigate()
@@ -179,53 +227,6 @@ export default function Viewer() {
     : `/api/proposals/${id}/file?token=${token}`
   const currentVersionNum = (proposal.versions?.length || 0) + 1
 
-  const CollapseBtn = ({ side, open, onClick }) => {
-    const isLeft = side === 'left'
-    return (
-      <button onClick={onClick}
-        title={open ? `Collapse ${isLeft ? 'sections' : 'review'} panel` : `Expand ${isLeft ? 'sections' : 'review'} panel`}
-        style={{
-          width: 24, flexShrink: 0, alignSelf: 'stretch', border: 'none', cursor: 'pointer',
-          background: '#f8fafc', color: '#94a3b8',
-          borderLeft: !isLeft ? '1px solid #e2e8f0' : 'none',
-          borderRight: isLeft ? '1px solid #e2e8f0' : 'none',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          transition: 'background 0.12s, color 0.12s'
-        }}
-        onMouseEnter={e => { e.currentTarget.style.background = '#e2e8f0'; e.currentTarget.style.color = '#475569' }}
-        onMouseLeave={e => { e.currentTarget.style.background = '#f8fafc'; e.currentTarget.style.color = '#94a3b8' }}>
-        {isLeft ? (
-          open ? (
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="1.5" y="2" width="13" height="12" rx="2"/>
-              <line x1="6" y1="2" x2="6" y2="14"/>
-              <polyline points="4,6.5 2.5,8 4,9.5"/>
-            </svg>
-          ) : (
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="1.5" y="2" width="13" height="12" rx="2"/>
-              <line x1="6" y1="2" x2="6" y2="14"/>
-              <polyline points="8,6.5 9.5,8 8,9.5"/>
-            </svg>
-          )
-        ) : (
-          open ? (
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="1.5" y="2" width="13" height="12" rx="2"/>
-              <line x1="10" y1="2" x2="10" y2="14"/>
-              <polyline points="12,6.5 13.5,8 12,9.5"/>
-            </svg>
-          ) : (
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="1.5" y="2" width="13" height="12" rx="2"/>
-              <line x1="10" y1="2" x2="10" y2="14"/>
-              <polyline points="8,6.5 6.5,8 8,9.5"/>
-            </svg>
-          )
-        )}
-      </button>
-    )
-  }
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden', fontFamily: '-apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif' }}>
