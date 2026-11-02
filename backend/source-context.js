@@ -208,6 +208,7 @@ function buildSourceStatus(allDocuments, proposal) {
     matchedDocumentCount: matched.length,
     matchedRequirementCount: matched.reduce((total, doc) => total + (doc.requirements?.length || 0), 0),
     researchSourceCount: research.length,
+    referenceSources: research.filter(doc => doc.referencePages?.length).map(doc => ({ id: doc.id, title: doc.title, sourceUrl: doc.sourceUrl, edition: doc.edition, pageCount: doc.referencePages.length, retrievedAt: doc.retrievedAt })),
     pendingDocuments: pending.map(doc => ({ id: doc.id, title: doc.title, extractionStatus: doc.extractionStatus })),
     matchedDocuments: matched.map(doc => ({
       id: doc.id,

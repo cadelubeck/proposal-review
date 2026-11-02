@@ -133,3 +133,5 @@ the UI and health endpoint should be checked before a sales demonstration.
 - Supabase: it is the database/storage service, not the Express backend. A paused
   free project must be restored from the Supabase dashboard.
 # MCP PR test
+
+Municipal research loads the bundled Utah discovery catalog even when the database has not been seeded. Discovery links remain unverified. Ogden’s official 2025 Engineering Standards are supplied as a page-numbered reference snapshot (SHA-256 and retrieval metadata in `backend/catalogs/ogden-engineering-2025-reference.json`); the three review tools receive relevant source passages and must state the actual provision and cite its section/page. Publication is distinct from project incorporation and approval. Refresh the snapshot when the governing edition changes.

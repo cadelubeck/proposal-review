@@ -349,6 +349,7 @@ function SourceSummary({ sources }) {
     <div style={eyebrow}>Jurisdiction filter</div>
     <div style={{ fontSize: 18, fontWeight: 850, marginTop: 6 }}>{sources.jurisdiction?.resolved ? `${sources.jurisdiction.state} → ${sources.jurisdiction.city}` : 'City and state required'}</div>
     <div style={{ color: '#66717d', fontSize: 12, marginTop: 5 }}>{sources.stateDocumentCount || 0} state records · {sources.cityDocumentCount || 0} city records · {sources.excludedJurisdictionDocumentCount || 0} unrelated records excluded</div>
+    {sources.referenceSources?.map(source => <div key={source.id} style={{ fontSize:12, marginTop:8 }}><a href={source.sourceUrl} target="_blank" rel="noreferrer">{source.title}</a> · {source.pageCount} pages of official reference text available</div>)}
   </section>
 }
 
@@ -389,6 +390,18 @@ function DiagramAnalysisDetails({ analysis, fileUrl, proposalUrl }) {
       </div>
     </div>
 
+    {analysis.standardsChecks?.length > 0 && <div style={{ padding: '18px 22px', borderBottom: '1px solid var(--border)' }}>
+      <h3 style={{ fontSize:17, marginBottom:12 }}>What the standards require</h3>
+      {analysis.standardsChecks.map((check, index) => <details key={`${check.subject}-${index}`} className="civic-standard-row" open>
+        <summary><strong>{check.subject}</strong><span className={`civic-pill ${check.result === 'fail' ? 'red' : check.result === 'pass' ? 'green' : 'amber'}`}>{check.result === 'fail' ? 'Conflict' : check.result === 'pass' ? 'Meets requirement' : 'Engineer review'}</span></summary>
+        <div className="fields">
+          <div className="field"><b>Published requirement</b>{check.requirement}</div>
+          <div className="field"><b>Submitted evidence</b>{check.submittedEvidence}</div>
+          <div className="field wide"><b>Comparison</b>{check.reason}</div>
+          <div className="field wide"><b>Source</b><a href={check.sourceUrl + (check.page ? `#page=${check.page}` : '')} target="_blank" rel="noreferrer">{check.sourceTitle}</a>{check.edition && ` · ${check.edition} edition`}{check.section && ` · § ${check.section}`}{check.page && ` · page ${check.page}`}</div>
+        </div>
+      </details>)}
+    </div>}
     <div className="civic-diagram-grid"><div className="civic-pdf-viewer">{fileUrl ? <iframe title="Proposal document" src={fileUrl} /> : <div className="civic-notice">No source file is attached to this proposal.</div>}</div><div className="civic-diagram-findings">
       <div style={{ marginBottom:12 }}><a href={proposalUrl} className="civic-btn">Open proposal viewer <Icon name="external" size={15} /></a></div>
       {analysis.criticalIssues?.length > 0 && <FindingList title="Critical issues" items={analysis.criticalIssues} color="#dc2626" background="#fef2f2" border="#fecaca" />}
