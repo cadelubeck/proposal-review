@@ -19,7 +19,7 @@ function referenceContext(documents, proposal, { maxPages = 18, maxChars = 48000
       let score = terms.reduce((sum, term) => sum + (text.includes(term) ? 1 : 0), 0)
       for (const pattern of TOPICS) if (pattern.test(query) && pattern.test(text)) score += 30
       const heading = text.slice(0, 450).replace(/\s+/g, '')
-      if (/\b(bore|boring|directional)\b/i.test(query) && /directionalbore|borepath/.test(heading)) score += 150
+      if (/bore|boring|directional/i.test(query) && /directionalbore|borepath/.test(heading)) score += 150
       // Contents pages list every topic without supplying the actual provisions.
       if (/table of contents/i.test(page.text)) score = 0
       return { ...page, score }
@@ -43,7 +43,9 @@ function referenceContext(documents, proposal, { maxPages = 18, maxChars = 48000
 }
 
 const STOP_WORDS = new Set('this that with from have shall must will there their these those which where been also into each only other more than when work city ogden utah page standards engineering general requirements plans plan notes existing proposed document following shown project public'.split(' '))
-const TOPICS = [/\b(bore|boring|directional)\b/i, /\b(vaults?|handholes?|cabinets?)\b/i, /\b(conduit|telecom|telecommunications)\b/i, /\b(restoration|repair)\b/i, /\b(traffic control)\b/i, /\b(storm|stormwater)\b/i, /\b(sanitary|sewer)\b/i]
+// PDF extraction often joins adjacent words ("intheborepath", "boredepth").
+// Topic retrieval must survive that without inventing missing plan evidence.
+const TOPICS = [/bore|boring|directional/i, /vault|handhole|cabinet/i, /conduit|telecom/i, /restoration|repair/i, /traffic\s*control/i, /storm/i, /sanitary|sewer/i]
 
 const REQUIREMENT_INSTRUCTIONS = 'State the actual applicable published requirement, numeric limit and units where present, source title/edition, section and page, then compare it to the submitted evidence. Do not replace an available requirement with a generic instruction to consult or obtain the city standards. Distinguish a missing standard from missing project evidence, an unconfirmed incorporated edition, or a needed approval. Preserve exceptions and scope: for example, street-light conduit requirements must not be applied to telecommunications conduit. Supplied official reference passages are source evidence even when no structured extraction exists. Never invent a threshold or claim a published standard alone proves compliance.'
 
