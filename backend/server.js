@@ -264,7 +264,12 @@ const SOURCE_TAXONOMY_TEXT = SOURCE_CATEGORIES
   .join('\n')
 
 function researchDomainsForDocuments(documents) {
-  const domains = [...RESEARCH_DOMAINS]
+  const domains = []
+  for (const doc of documents.filter(doc => doc.jurisdictionTier === 'city')) {
+    if ((doc.sensitivity || 'public') === 'restricted') continue
+    try { domains.push(new URL(doc.sourceUrl).hostname) } catch {}
+  }
+  domains.push(...RESEARCH_DOMAINS)
   for (const doc of documents) {
     if (!doc.sourceUrl || (doc.sensitivity || 'public') === 'restricted') continue
     try { domains.push(new URL(doc.sourceUrl).hostname) } catch {}
