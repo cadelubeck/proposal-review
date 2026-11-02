@@ -58,6 +58,10 @@ const { aiConfiguration, cancelBackgroundResponse, retrieveBackgroundStructuredR
   assert.deepEqual(completed.data, { result: 'background ok' })
   const cancelled = await cancelBackgroundResponse(started.responseId)
   assert.equal(cancelled.status, 'cancelled')
+  const beforeIncomplete = global.fetch
+  global.fetch = async () => ({ ok: true, json: async () => ({ id: 'resp_incomplete', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } }) })
+  await assert.rejects(retrieveBackgroundStructuredResponse('resp_incomplete'), error => error.code === 'max_output_tokens' && /per-request output limit/.test(error.message))
+  global.fetch = beforeIncomplete
   process.env.AI_ENABLED = 'false'
   await assert.rejects(
     structuredResponse({

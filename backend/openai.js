@@ -151,7 +151,12 @@ async function retrieveBackgroundStructuredResponse(responseId) {
   if (!response.ok) throw new Error(body.error?.message || `OpenAI API error ${response.status}`)
   if (['queued', 'in_progress'].includes(body.status)) return { responseId: body.id, model: body.model, status: body.status }
   if (body.status !== 'completed') {
-    throw new Error(body.error?.message || body.incomplete_details?.reason || `OpenAI background response ended with status ${body.status || 'unknown'}`)
+    const reason = body.incomplete_details?.reason
+    const error = new Error(body.error?.message || (reason === 'max_output_tokens'
+      ? 'The AI response reached its per-request output limit before finishing. Previously completed batches are preserved.'
+      : reason || `OpenAI background response ended with status ${body.status || 'unknown'}`))
+    error.code = reason || body.status
+    throw error
   }
   return completedResponse(body)
 }
