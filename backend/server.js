@@ -11,6 +11,7 @@ const { aiConfiguration, cancelBackgroundResponse, checkConnection, retrieveBack
 const { pdfPageBatch, pdfPageCount, splitTextPages } = require('./document-pages')
 const { applyCalculationAudits, buildMatrix } = require('./compliance')
 const { auditCalculations } = require('./calculation-audit')
+const { createDirectUploads } = require('./direct-upload')
 const { RESEARCH_DOMAINS, buildSourceStatus, hasExplicitState, matchingDocuments, researchDocuments, resolveProposalJurisdiction } = require('./source-context')
 const { SOURCE_CATEGORIES, SOURCE_CATEGORY_KEYS, categoryDefinition, documentCategory } = require('./source-catalog')
 const { municipalities: UTAH_MUNICIPALITIES = [] } = require('./catalogs/utah-source-catalog.json')
@@ -24,7 +25,7 @@ const {
   readIndex, writeIndex, readProposal, writeProposal, deleteProposal,
   readStandards, writeStandards, upsertStandards, readUsers, writeUsers, readCompanies, writeCompanies,
   readInvites, writeInvites, writeAudit, readAudit,
-  saveUpload, readUpload, deleteUpload, standardStoreKeys
+  saveUpload, readUpload, deleteUpload, standardStoreKeys, createUploadUrl, createDownloadUrl
 } = require('./persistence')
 
 const app = express()
@@ -95,7 +96,11 @@ app.use((req, res, next) => {
 function requireAuth(req, res, next) {
   const token = (req.headers.authorization || '').replace('Bearer ', '') || req.query.token
   if (!token) return res.status(401).json({ error: 'Authentication required' })
-  try { req.user = jwt.verify(token, JWT_SECRET); next() }
+  try {
+    req.user = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] })
+    if (!req.user.id || req.user.aud === 'document-upload') throw new Error('Not a session token')
+    next()
+  }
   catch { return res.status(401).json({ error: 'Invalid or expired session. Please log in again.' }) }
 }
 
@@ -105,6 +110,16 @@ const storage = cloud ? multer.memoryStorage() : multer.diskStorage({
   filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
 })
 const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } })
+const directUploads = createDirectUploads({ secret: JWT_SECRET, createUploadUrl, readUpload })
+const receiveDocument = purpose => async (req, res, next) => {
+  try {
+    if (req.body.uploadReceipt) {
+      if (!cloud || req.file) return res.status(400).json({ error: 'Invalid upload request.' })
+      req.file = await directUploads.resolve(req.body.uploadReceipt, await currentUser(req), purpose, req.params.id)
+    }
+    next()
+  } catch (error) { next(error) }
+}
 
 // ── Section detection ──
 function detectSections(text) {
@@ -703,7 +718,18 @@ app.get('/api/proposals/:id/analysis-sources', async (req, res) => {
   res.json(buildSourceStatus(await readAnalysisStandards(req), proposal))
 })
 
-app.post('/api/standards', upload.single('file'), async (req, res) => {
+app.post('/api/uploads/prepare', async (req, res) => {
+  const user = await currentUser(req)
+  if (!user?.companyId) return res.status(403).json({ error: 'An organization is required before uploading.' })
+  if (!cloud) return res.json({ direct: false })
+  if (req.body.purpose === 'version') {
+    const proposal = await readProposal(req.body.proposalId)
+    if (!proposal || !await canAccess(req, proposal)) return res.status(403).json({ error: 'Access denied' })
+  }
+  res.json({ direct: true, ...await directUploads.prepare(user, req.body) })
+})
+
+app.post('/api/standards', upload.single('file'), receiveDocument('standard'), async (req, res) => {
   try {
     const user = await currentUser(req)
     const sourceUrl = req.body.sourceUrl?.trim() || ''
@@ -1006,7 +1032,7 @@ app.get('/api/proposals/:id', async (req, res) => {
   res.json(p)
 })
 
-app.post('/api/proposals', upload.single('file'), async (req, res) => {
+app.post('/api/proposals', upload.single('file'), receiveDocument('proposal'), async (req, res) => {
   try {
     const { name, company, location } = req.body
     const postalCode = String(req.body.postal_code || '').trim()
@@ -1116,6 +1142,11 @@ app.get('/api/proposals/:id/file', async (req, res) => {
     var fileContentType = p.file_content_type
   }
   try {
+    if ((fileStorage || (cloud ? 'supabase' : 'local')) === 'supabase') {
+      res.setHeader('Cache-Control', 'private, no-store')
+      res.setHeader('Referrer-Policy', 'no-referrer')
+      return res.redirect(await createDownloadUrl(filePath))
+    }
     const contents = await readUpload(filePath, fileStorage)
     res.setHeader('Content-Type', fileContentType || 'application/pdf')
     res.setHeader('Content-Disposition', 'inline')
@@ -1126,7 +1157,7 @@ app.get('/api/proposals/:id/file', async (req, res) => {
 })
 
 // ── Upload new document version ──
-app.post('/api/proposals/:id/versions', upload.single('file'), async (req, res) => {
+app.post('/api/proposals/:id/versions', upload.single('file'), receiveDocument('version'), async (req, res) => {
   try {
     const p = await readProposal(req.params.id)
     if (!p) return res.status(404).json({ error: 'Not found' })

@@ -204,9 +204,24 @@ function safeObjectName(value) {
   return value.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-160)
 }
 
+async function createUploadUrl(objectPath) {
+  const data = await supabaseRequest(`/storage/v1/object/upload/sign/${STORAGE_BUCKET}/${objectPath.split('/').map(encodeURIComponent).join('/')}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'x-upsert': 'false' }, body: '{}'
+  })
+  return new URL(`${supabaseUrl}/storage/v1${data.url}`).toString()
+}
+
+async function createDownloadUrl(objectPath) {
+  const data = await supabaseRequest(`/storage/v1/object/sign/${STORAGE_BUCKET}/${objectPath.split('/').map(encodeURIComponent).join('/')}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expiresIn: 3600 })
+  })
+  return new URL(`${supabaseUrl}/storage/v1${data.signedURL}`).toString()
+}
+
 async function saveUpload(file, companyId, recordId) {
   if (!file) return null
   if (!cloud) return { path: file.path, storage: 'local', contentType: file.mimetype, originalName: file.originalname }
+  if (file.storagePath) return { path: file.storagePath, storage: 'supabase', contentType: file.mimetype, originalName: file.originalname }
   const objectPath = `${companyId}/${recordId}/${Date.now()}-${safeObjectName(file.originalname)}`
   await supabaseRequest(`/storage/v1/object/${STORAGE_BUCKET}/${objectPath.split('/').map(encodeURIComponent).join('/')}`, {
     method: 'POST', headers: { 'Content-Type': file.mimetype || 'application/octet-stream', 'x-upsert': 'false' }, body: file.buffer
@@ -246,5 +261,5 @@ module.exports = {
   readIndex, writeIndex, readProposal, writeProposal, deleteProposal,
   readStandards, writeStandards, upsertStandards, readUsers, writeUsers, readCompanies, writeCompanies,
   readInvites, writeInvites, writeAudit, readAudit,
-  saveUpload, readUpload, deleteUpload, standardStoreKeys
+  saveUpload, readUpload, deleteUpload, standardStoreKeys, createUploadUrl, createDownloadUrl
 }

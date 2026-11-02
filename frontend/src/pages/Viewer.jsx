@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useAuth, useApiFetch } from '../context/AuthContext'
+import { uploadDocument } from '../document-upload.mjs'
 
 const SCORES = {
   green:  { color: '#16a34a', bg: '#f0fdf4', border: '#bbf7d0', label: 'Not Concerned', dot: '#22c55e' },
@@ -120,12 +121,10 @@ export default function Viewer() {
     if (!versionFile) return
     setUploadingVersion(true)
     try {
-      const form = new FormData()
-      form.append('file', versionFile)
-      if (versionLabel.trim()) form.append('label', versionLabel.trim())
-      const r = await apiFetch(`/api/proposals/${id}/versions`, { method: 'POST', body: form })
-      const result = await r.json()
-      if (!r.ok) throw new Error(result.error || 'Upload failed')
+      await uploadDocument(apiFetch, `/api/proposals/${id}/versions`, {
+        file: versionFile, purpose: 'version', proposalId: id,
+        fields: { label: versionLabel.trim() }
+      })
       setVersionFile(null); setVersionLabel(''); setSelectedVersion(null)
       setVersionModal(false)
       await load()

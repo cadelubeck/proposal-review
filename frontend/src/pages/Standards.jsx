@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth, useApiFetch } from '../context/AuthContext'
+import { uploadDocument } from '../document-upload.mjs'
 
 const TYPES = [
   ['city_standard', 'Standard / code'], ['client_standard', 'Client standard'], ['manual', 'Manual / specification'],
@@ -27,13 +28,11 @@ export default function Standards() {
   const upload = async () => {
     if (!file && !form.sourceUrl.trim()) return
     setBusy('upload'); setError('')
-    const body = new FormData()
-    if (file) body.append('file', file)
-    Object.entries(form).forEach(([key, value]) => body.append(key, value))
-    const response = await apiFetch('/api/standards', { method: 'POST', body })
-    const data = await response.json(); setBusy('')
-    if (!response.ok) return setError(data.error || 'Source could not be added')
-    setFile(null); setForm(emptyForm(isAdmin)); load()
+    try {
+      await uploadDocument(apiFetch, '/api/standards', { file, fields: form, purpose: 'standard' })
+      setFile(null); setForm(emptyForm(isAdmin)); await load()
+    } catch (error) { setError(error.message) }
+    finally { setBusy('') }
   }
   const extract = async id => {
     setBusy(id); setError('')

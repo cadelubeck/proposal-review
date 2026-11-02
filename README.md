@@ -112,11 +112,12 @@ Deployment preparation:
 6. Verify `/api/health`, login, a private upload/download, shared standards, and
    the Source health admin screen before treating the deployment as usable.
 
-Vercel Functions reject request or response bodies above 4.5 MB. The current
-multipart upload routes are therefore suitable only for small preview documents
-on Vercel. Before enabling normal plan-set uploads in production, change the
-browser flow to use a Supabase signed/resumable upload directly to Storage, then
-send only the stored object path to the API. Local uploads still allow 50 MB.
+PDF and text uploads support files up to 50 MB. In production, the browser
+uploads directly to private Supabase Storage using a signed URL, then sends a
+signed receipt to the API for text extraction and record creation. Receipts are
+bound to the user, organization, and upload destination. Proposal viewing uses
+short-lived signed download URLs so large files also bypass Vercel's response
+size limit. Local development retains multipart uploads.
 
 Vercel Hobby is for personal/non-commercial use. Before accepting payment or
 using the product commercially, review Vercel's current plan terms and deliberately

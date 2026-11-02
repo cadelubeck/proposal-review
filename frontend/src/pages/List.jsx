@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth, useApiFetch } from '../context/AuthContext'
 import Icon from '../components/Icon'
+import { uploadDocument } from '../document-upload.mjs'
 
 const SC = { pending:'#66717d', in_review:'#087d73', needs_updates:'#94570e', accepted:'#177055', rejected:'#b43c38' }
 const SL = { pending:'Pending', in_review:'In Review', needs_updates:'Needs Updates', accepted:'Accepted', rejected:'Rejected' }
@@ -85,14 +86,13 @@ export default function List() {
     if (form.postalCode && !/^\d{5}(?:-\d{4})?$/.test(form.postalCode.trim())) return alert('ZIP code must use 5 digits or ZIP+4 format')
     if (!file && !pasteText.trim()) return alert('Upload a file or paste text')
     setUploading(true)
-    const fd = new FormData()
-    fd.append('name', form.name); fd.append('company', form.company); fd.append('location', form.location)
-    fd.append('postal_code', form.postalCode.trim())
-    if (file) fd.append('file', file); else fd.append('text_content', pasteText)
     try {
-      const r = await apiFetch('/api/proposals', { method: 'POST', body: fd })
-      const data = await r.json()
-      if (!r.ok) throw new Error(data.error || 'Upload failed.')
+      const data = await uploadDocument(apiFetch, '/api/proposals', {
+        file, purpose: 'proposal', fields: {
+          name: form.name, company: form.company, location: form.location,
+          postal_code: form.postalCode.trim(), ...(!file ? { text_content: pasteText } : {})
+        }
+      })
       const { id } = data
       nav(`/proposal/${id}`)
     } catch (e) { alert('Upload failed: ' + e.message) }
